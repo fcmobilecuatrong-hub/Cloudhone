@@ -75,28 +75,6 @@ app.get('/redeem', async (req, res) => {
 });
 app.get('/', (req, res) => res.send('Bot đang chạy ✅'));
 
-// Debug endpoint — xóa sau khi debug xong
-app.get('/test-buycloud', async (req, res) => {
-    const HANA_TOKEN = process.env.HANA_TOKEN || 'f106a0edfe3b9f708835c6ed7a33d0a0bed11dfe088c24';
-    const body = { token: HANA_TOKEN, cloud_id: 'VS', input_data: 'test@gmail.com|test123' };
-    try {
-        const r = await fetch('https://hanaminikata.com/dev/buy_device_cloud', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'User-Agent': 'Mozilla/5.0',
-                'Accept': 'application/json, */*'
-            },
-            body: JSON.stringify(body),
-            signal: AbortSignal.timeout(15000)
-        });
-        const text = await r.text();
-        res.type('text').send(`STATUS: ${r.status}\nHEADERS: ${JSON.stringify(Object.fromEntries(r.headers))}\nBODY:\n${text}`);
-    } catch (e) {
-        res.status(500).type('text').send(`FETCH ERROR: ${e.message}`);
-    }
-});
-
 // Tự truy cập web của chính mình mỗi 5 phút để Render không cho ngủ
 const SELF_URL = process.env.RENDER_EXTERNAL_URL || process.env.RENDER_DOMAIN;
 if (SELF_URL && SELF_URL.startsWith('https://')) {
@@ -113,11 +91,7 @@ async function onReady(client, token) {
         new SlashCommandBuilder().setName('getlink').setDescription('Lấy link nhiệm vụ nhận 50 xu (2 lần/ngày)').addStringOption(opt => opt.setName('provider').setDescription('Dịch vụ').addChoices({ name: 'Link4M', value: 'link4m' }, { name: 'LayMa', value: 'layma' }).setRequired(false)),
         new SlashCommandBuilder().setName('vi').setDescription('Xem số dư xu'),
         new SlashCommandBuilder().setName('reg').setDescription('Lấy mail|pass|mã mời (10 xu)'),
-        new SlashCommandBuilder().setName('buycloud').setDescription('Mua cloud phone (50 xu)')
-            .addStringOption(opt => opt.setName('cloud_id').setDescription('Loại cloud').setRequired(true)
-                .addChoices({ name: 'UGPhone', value: 'UG' }, { name: 'VSPhone', value: 'VS' }, { name: 'VMOS', value: 'VM' }))
-            .addStringOption(opt => opt.setName('server').setDescription('Khu vực máy chủ (bắt buộc nếu chọn UGPhone)').setRequired(false)
-                .addChoices({ name: 'Singapore', value: 'SG' }, { name: 'Hong Kong', value: 'HK' }, { name: 'Japan', value: 'JP' }, { name: 'Germany', value: 'DE' }, { name: 'US', value: 'US' })),
+        new SlashCommandBuilder().setName('buycloud').setDescription('Mua cloud phone: nhập tài khoản/mật khẩu'),
         new SlashCommandBuilder().setName('daily').setDescription('Điểm danh nhận 20 xu'),
         new SlashCommandBuilder().setName('top').setDescription('BXH kiếm xu').addIntegerOption(o => o.setName('limit').setDescription('Số người').setRequired(false)),
         new SlashCommandBuilder().setName('transfer').setDescription('Chuyển xu (phí 5%)').addUserOption(o => o.setName('target').setDescription('Người nhận').setRequired(true)).addIntegerOption(o => o.setName('amount').setDescription('Số xu').setRequired(true).setMinValue(10)),
@@ -126,10 +100,7 @@ async function onReady(client, token) {
         new SlashCommandBuilder().setName('clear').setDescription('Xóa tin nhắn bot (Admin)'),
         new SlashCommandBuilder().setName('capquyenadmin').setDescription('Cấp quyền Admin').addUserOption(o => o.setName('target').setDescription('User').setRequired(true)),
         new SlashCommandBuilder().setName('thuquyenadmin').setDescription('Thu hồi quyền Admin').addUserOption(o => o.setName('target').setDescription('User').setRequired(true)),
-        new SlashCommandBuilder().setName('xoatk').setDescription('Xóa data user (Admin)').addUserOption(o => o.setName('target').setDescription('User').setRequired(true)),
-        new SlashCommandBuilder().setName('setcookie').setDescription('Cập nhật CF cookie cho buycloud (Admin)')
-            .addStringOption(o => o.setName('cf_clearance').setDescription('Giá trị cf_clearance cookie').setRequired(true))
-            .addStringOption(o => o.setName('useragent').setDescription('User-Agent của browser lấy cookie').setRequired(false))
+        new SlashCommandBuilder().setName('xoatk').setDescription('Xóa data user (Admin)').addUserOption(o => o.setName('target').setDescription('User').setRequired(true))
     ].map(c => c.toJSON());
 
     try {
@@ -156,124 +127,61 @@ async function onInteraction(interaction) {
 }
 
 async function handleBuyCloud(interaction) {
-    // customId format: buycloud_modal|<cloud_id>|<server_or_NONE>
-    const [, cloud_id, serverRaw] = interaction.customId.split('|');
-    const server = serverRaw === 'NONE' ? null : serverRaw;
-    const input_data = interaction.fields.getTextInputValue('info').trim();
-
-    if (!input_data || input_data.length > 500) {
-        return interaction.reply({ content: '❌ Dữ liệu đầu vào không hợp lệ.', flags: MessageFlags.Ephemeral });
+    const raw = interaction.fields.getTextInputValue('info').trim();
+    const i = raw.indexOf('/');
+    const account = i > 0 ? raw.slice(0, i).trim() : '';
+    const password = i > 0 ? raw.slice(i + 1).trim() : '';
+    if (!account || !password || raw.length > 300) {
+        return interaction.reply({ content: '❌ Sai định dạng. Nhập theo mẫu: `taikhoan/matkhau` (ngăn cách bằng dấu `/`).', flags: MessageFlags.Ephemeral });
     }
-
+    if (!process.env.HANAMI_TOKEN) {
+        return interaction.reply({ content: '❌ Bot chưa cấu hình token mua cloud (HANAMI_TOKEN).', flags: MessageFlags.Ephemeral });
+    }
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-
-    const BUYCLOUD_PRICE = parseInt(process.env.BUYCLOUD_PRICE || '50');
     const userId = interaction.user.id;
-
-    // Trừ xu trước khi gọi API
-    const remaining = await redis.decrby(`coins_${userId}`, BUYCLOUD_PRICE);
-    if (remaining < 0) {
-        await redis.incrby(`coins_${userId}`, BUYCLOUD_PRICE);
-        return interaction.editReply({ content: `❌ Không đủ xu. Bạn cần **${BUYCLOUD_PRICE} xu** để mua cloud.` });
-    }
-
-    try {
-        const HANA_TOKEN = process.env.HANA_TOKEN || 'f106a0edfe3b9f708835c6ed7a33d0a0bed11dfe088c24';
-        const body = { token: HANA_TOKEN, cloud_id, input_data };
-        if (server) body.server = server;
-
-        const cfClearance = await redis.get('cf_clearance');
-        const cfUserAgent = await redis.get('cf_useragent') || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
-        if (!cfClearance) {
-            await redis.incrby(`coins_${userId}`, BUYCLOUD_PRICE);
-            return interaction.editReply({ content: '❌ Chưa cấu hình CF cookie. Admin dùng `/setcookie` để cập nhật.' });
+    const cost = parseInt(process.env.BUYCLOUD_COST || '0') || 0;
+    if (cost > 0) {
+        const left = await redis.decrby(`coins_${userId}`, cost);
+        if (left < 0) {
+            await redis.incrby(`coins_${userId}`, cost);
+            return interaction.editReply({ content: `❌ Không đủ ${cost} xu.` });
         }
-
+    }
+    let result;
+    try {
         const res = await fetch('https://hanaminikata.com/dev/buy_device_cloud', {
             method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'User-Agent': cfUserAgent,
-                'Accept': 'application/json, */*',
-                'Cookie': `cf_clearance=${cfClearance}`
-            },
-            body: JSON.stringify(body),
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ token: process.env.HANAMI_TOKEN, cloud_id: 'VM', input_data: `${account}|${password}` }),
             signal: AbortSignal.timeout(30000)
         });
-
         const text = await res.text();
-        console.log(`[buycloud] status=${res.status} body=${text.slice(0, 300)}`);
-
-        let data;
-        try {
-            data = JSON.parse(text);
-        } catch {
-            if (res.status === 403) {
-                // Cookie hết hạn
-                await redis.incrby(`coins_${userId}`, BUYCLOUD_PRICE);
-                return interaction.editReply({ content: '❌ CF cookie hết hạn. Admin cần dùng `/setcookie` để cập nhật cookie mới.' });
-            }
-            const preview = text.replace(/<[^>]*>/g, '').trim().slice(0, 200);
-            await redis.incrby(`coins_${userId}`, BUYCLOUD_PRICE);
-            return interaction.editReply({ content: `❌ HTTP ${res.status}:\n\`\`\`\n${preview || '(trống)'}\n\`\`\`` });
-        }
-
-        if (data.code === 0) {
-            const embed = new EmbedBuilder()
-                .setColor(0x39f58a)
-                .setTitle('✅ Mua Cloud Thành Công')
-                .addFields(
-                    { name: 'Loại Cloud', value: cloud_id, inline: true },
-                    { name: 'Khu vực', value: server || 'Mặc định', inline: true },
-                    { name: 'Kết quả', value: data.message || 'Thành công' },
-                    { name: 'Xu đã dùng', value: `${BUYCLOUD_PRICE} xu`, inline: true },
-                    { name: 'Số dư còn lại', value: `${remaining} xu`, inline: true }
-                );
-            await interaction.editReply({ embeds: [embed] });
-        } else {
-            // Hoàn xu nếu API trả lỗi
-            await redis.incrby(`coins_${userId}`, BUYCLOUD_PRICE);
-            await interaction.editReply({ content: `❌ Lỗi từ hệ thống: ${data.message || JSON.stringify(data)}` });
-        }
-    } catch (err) {
-        await redis.incrby(`coins_${userId}`, BUYCLOUD_PRICE);
-        console.error('[buycloud]', err.message || err);
-        await interaction.editReply({ content: `❌ Lỗi kết nối: \`${err.message || err}\`` });
+        console.log('[buycloud]', userId, account, res.status, text.slice(0, 300));
+        try { result = JSON.parse(text); }
+        catch { result = { code: -1, message: `Máy chủ mua cloud trả về lỗi (HTTP ${res.status}).` }; }
+    } catch (e) {
+        console.error('[buycloud]', e.message);
+        result = { code: -1, message: 'Không kết nối được tới máy chủ mua cloud.' };
     }
+    const ok = !!result && result.code === 0;
+    const message = String((result && result.message) || 'Có lỗi xảy ra.');
+    if (!ok && cost > 0) await redis.incrby(`coins_${userId}`, cost); // hoàn xu
+    await redis.rpush('buycloud_orders', JSON.stringify({ userId, account, ok, message, at: Date.now() }));
+    for (const id of await getAdminIds()) {
+        try {
+            const admin = await interaction.client.users.fetch(id);
+            await admin.send(`🛒 Buycloud: <@${userId}> | \`${account}\` | ${ok ? 'thành công' : 'lỗi'}: ${message}`);
+        } catch {}
+    }
+    await interaction.editReply({ content: ok ? message : `❌ ${message}` });
 }
 
 async function handleInteraction(interaction) {
-    if (interaction.isModalSubmit() && interaction.customId.startsWith('buycloud_modal')) return handleBuyCloud(interaction);
+    if (interaction.isModalSubmit() && interaction.customId === 'buycloud_modal') return handleBuyCloud(interaction);
     if (!interaction.isChatInputCommand()) return;
     if (interaction.commandName === 'buycloud') {
-        const cloud_id = interaction.options.getString('cloud_id');
-        const server = interaction.options.getString('server');
-
-        if (cloud_id === 'UG' && !server) {
-            return interaction.reply({ content: '❌ **UGPhone** yêu cầu chọn **Khu vực máy chủ** (server).', flags: MessageFlags.Ephemeral });
-        }
-
-        const BUYCLOUD_PRICE = parseInt(process.env.BUYCLOUD_PRICE || '50');
-        const modalId = `buycloud_modal|${cloud_id}|${server || 'NONE'}`;
-        const modal = new ModalBuilder().setCustomId(modalId).setTitle(`Mua ${cloud_id === 'UG' ? 'UGPhone' : cloud_id === 'VS' ? 'VSPhone' : 'VMOS'} (${BUYCLOUD_PRICE} xu)`);
-
-        let label, placeholder;
-        if (cloud_id === 'UG') {
-            label = 'Nhập Local Storage string';
-            placeholder = 'Dán chuỗi Local Storage vào đây...';
-        } else {
-            label = 'Nhập: taikhoan|matkhau';
-            placeholder = 'example@gmail.com|matkhau123';
-        }
-
-        const input = new TextInputBuilder()
-            .setCustomId('info')
-            .setLabel(label)
-            .setPlaceholder(placeholder)
-            .setStyle(cloud_id === 'UG' ? TextInputStyle.Paragraph : TextInputStyle.Short)
-            .setRequired(true)
-            .setMaxLength(500);
-
+        const modal = new ModalBuilder().setCustomId('buycloud_modal').setTitle('Mua Cloud Phone');
+        const input = new TextInputBuilder().setCustomId('info').setLabel('Nhập: taikhoan/matkhau').setPlaceholder('gggggggg@##/mkvfjjf').setStyle(TextInputStyle.Short).setRequired(true).setMaxLength(300);
         modal.addComponents(new ActionRowBuilder().addComponents(input));
         return interaction.showModal(modal);
     }
@@ -451,16 +359,6 @@ async function handleInteraction(interaction) {
         await interaction.editReply({ content: removed ? `✅ Đã thu hồi quyền của <@${target.id}>.` : `ℹ️ Không có quyền.` });
     }
 
-    if (interaction.commandName === 'setcookie') {
-        if (!adminIds.includes(userId)) return interaction.reply({ content: '❌ Không có quyền.', flags: MessageFlags.Ephemeral });
-        const cfVal = interaction.options.getString('cf_clearance').trim();
-        const ua = interaction.options.getString('useragent');
-        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-        await redis.set('cf_clearance', cfVal, 'EX', 6 * 60 * 60); // hết hạn sau 6 tiếng
-        if (ua) await redis.set('cf_useragent', ua.trim(), 'EX', 6 * 60 * 60);
-        await interaction.editReply({ content: `✅ Đã cập nhật CF cookie (hết hạn sau 6 tiếng).${ua ? '\n✅ Đã lưu User-Agent.' : ''}` });
-    }
-
     if (interaction.commandName === 'xoatk') {
         if (!adminIds.includes(userId)) return interaction.reply({ content: '❌ Không có quyền.', flags: MessageFlags.Ephemeral });
         const target = interaction.options.getUser('target');
@@ -485,7 +383,6 @@ small{color:#91a096}#msg{color:#ffc107;margin-bottom:10px}
 <h2>🤖 Bảng điều khiển bot</h2>
 <div id="msg"></div><div id="list"></div>
 <div class="card"><b>Thêm bot mới</b><br><small>Dán token bot Discord, bot sẽ tự chạy ngay.</small><br><br><input id="tk" type="password" placeholder="Token bot"><button class="on" onclick="add()">Thêm &amp; bật</button></div>
-<div class="card"><b>🍪 CF Cookie (BuyCloud)</b><br><small>Dán cf_clearance từ hanaminikata.com để /buycloud hoạt động.</small><br><br><input id="cf" type="text" placeholder="cf_clearance value"><input id="ua" type="text" placeholder="User-Agent (tuỳ chọn)"><button class="on" onclick="saveCookie()">Lưu cookie</button></div>
 <script>
 var K=sessionStorage.getItem('k')||'';
 function api(m,u,b){return fetch(u,{method:m,headers:{'Content-Type':'application/json','x-panel-key':K},body:b?JSON.stringify(b):undefined}).then(function(r){return r.json().then(function(j){if(r.status==401){K='';sessionStorage.removeItem('k');}if(!r.ok)throw new Error(j.error||'Lỗi');return j;});});}
@@ -510,7 +407,6 @@ function load(){
  }).catch(function(e){say(e.message);});
 }
 function add(){var i=document.getElementById('tk');say('Đang thêm bot...');api('POST','/panel/api/bots',{token:i.value}).then(function(){i.value='';load();}).catch(function(e){say(e.message);});}
-function saveCookie(){var cf=document.getElementById('cf').value.trim();var ua=document.getElementById('ua').value.trim();if(!cf){say('Nhập cf_clearance trước!');return;}say('Đang lưu...');api('POST','/panel/api/setcookie',{cf_clearance:cf,useragent:ua||null}).then(function(){say('✅ Đã lưu CF cookie (hết hạn 6 tiếng)!');document.getElementById('cf').value='';}).catch(function(e){say(e.message);});}
 load();
 </script></body></html>`;
 const running = new Map(); // id -> Client đang chạy
@@ -560,14 +456,6 @@ function panelAuth(req, res, next) {
 const botView = b => ({ id: b.id, name: b.name, enabled: !!b.enabled, online: running.has(b.id), tail: b.id === 'main' ? 'trong .env' : '...' + String(b.token).slice(-4) });
 
 app.get('/panel', (req, res) => res.type('html').send(PANEL_HTML));
-app.post('/panel/api/setcookie', panelAuth, async (req, res) => {
-    const cf = String((req.body && req.body.cf_clearance) || '').trim();
-    const ua = String((req.body && req.body.useragent) || '').trim();
-    if (!cf) return res.status(400).json({ error: 'Thiếu cf_clearance' });
-    await redis.set('cf_clearance', cf, 'EX', 6 * 60 * 60);
-    if (ua) await redis.set('cf_useragent', ua, 'EX', 6 * 60 * 60);
-    res.json({ ok: true });
-});
 app.get('/panel/api/bots', panelAuth, async (req, res) => res.json((await getBots()).map(botView)));
 app.post('/panel/api/bots', panelAuth, async (req, res) => {
     const token = String((req.body && req.body.token) || '').trim();
