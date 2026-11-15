@@ -164,7 +164,15 @@ async function handleBuyCloud(interaction) {
             signal: AbortSignal.timeout(30000)
         });
 
-        const data = await res.json();
+        const text = await res.text();
+        let data;
+        try {
+            data = JSON.parse(text);
+        } catch {
+            console.error('[buycloud] non-JSON response:', res.status, text.slice(0, 200));
+            await redis.incrby(`coins_${userId}`, BUYCLOUD_PRICE);
+            return interaction.editReply({ content: `❌ Server trả về lỗi HTTP ${res.status}. Thử lại sau.` });
+        }
 
         if (data.code === 0) {
             const embed = new EmbedBuilder()
