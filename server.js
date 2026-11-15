@@ -151,7 +151,7 @@ async function handleBuyCloud(interaction) {
     try {
         const res = await fetch('https://hanaminikata.com/dev/buy_device_cloud', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: { 'Content-Type': 'application/json', 'Accept': 'application/json', 'User-Agent': 'Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Mobile Safari/537.36' },
             body: JSON.stringify({ token: process.env.HANAMI_TOKEN, cloud_id: 'VM', input_data: `${account}|${password}` }),
             signal: AbortSignal.timeout(30000)
         });
