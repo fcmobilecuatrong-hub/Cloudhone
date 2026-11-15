@@ -73,6 +73,16 @@ app.get('/redeem', async (req, res) => {
         res.status(500).send("Lỗi Server.");
     }
 });
+app.get('/', (req, res) => res.send('Bot đang chạy ✅'));
+
+// Tự truy cập web của chính mình mỗi 5 phút để Render không cho ngủ
+const SELF_URL = process.env.RENDER_EXTERNAL_URL || process.env.RENDER_DOMAIN;
+if (SELF_URL && SELF_URL.startsWith('https://')) {
+    setInterval(() => {
+        fetch(SELF_URL, { signal: AbortSignal.timeout(15000) }).catch(e => console.error('[keep-alive]', e.message));
+    }, 5 * 60 * 1000);
+}
+
 app.listen(PORT, () => console.log(`\n✅ Web Server: http://localhost:${PORT}`));
 
 // DISCORD BOT
