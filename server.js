@@ -370,43 +370,97 @@ async function handleInteraction(interaction) {
 }
 
 // ===== QUẢN LÝ NHIỀU BOT + BẢNG ĐIỀU KHIỂN =====
-const PANEL_HTML = String.raw`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Bảng điều khiển bot</title>
+const PANEL_HTML = String.raw`<!doctype html><html lang="vi"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#0e0f1c">
+<title>Bảng điều khiển bot</title>
 <style>
-body{margin:0;background:#080d0b;color:#fff;font-family:sans-serif;padding:16px}
-.card{background:#101a14;border:1px solid #1f3a2b;border-radius:12px;padding:14px;margin-bottom:12px}
-.row{display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap}
-button{border:0;border-radius:8px;padding:8px 14px;font-weight:bold;cursor:pointer}
-.on{background:#39f58a;color:#000}.off{background:#ff6b81;color:#000}.del{background:#2a2f2c;color:#fff}
-input{width:100%;box-sizing:border-box;padding:10px;border-radius:8px;border:1px solid #1f3a2b;background:#0b120e;color:#fff;margin-bottom:8px}
-small{color:#91a096}#msg{color:#ffc107;margin-bottom:10px}
-</style></head><body>
-<h2>🤖 Bảng điều khiển bot</h2>
-<div id="msg"></div><div id="list"></div>
-<div class="card"><b>Thêm bot mới</b><br><small>Dán token bot Discord, bot sẽ tự chạy ngay.</small><br><br><input id="tk" type="password" placeholder="Token bot"><button class="on" onclick="add()">Thêm &amp; bật</button></div>
+:root{--bg:#0e0f1c;--sf:#171830;--ln:#26284a;--tx:#eceeff;--mut:#8a8fb8;--on:#5ee6a8;--ac:#6b78ff;--bad:#ff7a90}
+*{box-sizing:border-box}
+body{margin:0;min-height:100vh;background:var(--bg);color:var(--tx);font:16px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+.wrap{max-width:520px;margin:0 auto;padding:28px 18px 80px}
+header{display:flex;justify-content:space-between;align-items:flex-end;gap:12px;margin-bottom:22px}
+h1{margin:0;font-size:26px;font-weight:700;letter-spacing:-.02em}
+.summary{margin:4px 0 0;color:var(--mut);font-size:14px}
+.summary b{color:var(--on);font-weight:600}
+.ghost{background:none;border:1px solid var(--ln);color:var(--mut);border-radius:10px;padding:8px 12px;font:inherit;font-size:13px;cursor:pointer}
+.panel{background:var(--sf);border:1px solid var(--ln);border-radius:20px;overflow:hidden}
+.bot{display:flex;align-items:center;gap:14px;padding:16px 16px;border-top:1px solid var(--ln);transition:opacity .2s}
+.bot:first-child{border-top:0}.bot.busy{opacity:.5;pointer-events:none}
+.av{width:46px;height:46px;border-radius:50%;background:#23265a;color:#aab2ff;display:grid;place-items:center;font-weight:700;font-size:18px;flex:none}
+.info{flex:1;min-width:0}
+.name{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sub{display:flex;align-items:center;gap:7px;font-size:13px;color:var(--mut);margin-top:3px}
+.dot{width:8px;height:8px;border-radius:50%;background:#4a4e78;flex:none}
+.on .dot{background:var(--on);box-shadow:0 0 0 4px rgba(94,230,168,.15)}
+.on .st{color:var(--on)}
+.del{background:none;border:0;color:var(--bad);font:inherit;font-size:13px;padding:6px 4px;cursor:pointer;opacity:.8}
+.sw{position:relative;width:64px;height:36px;flex:none}
+.sw input{position:absolute;inset:0;width:100%;height:100%;margin:0;opacity:0;cursor:pointer;z-index:2}
+.sw i{position:absolute;inset:0;border-radius:99px;background:#2b2e55;transition:background .2s}
+.sw i:after{content:"";position:absolute;left:4px;top:4px;width:28px;height:28px;border-radius:50%;background:#fff;transition:transform .2s}
+.sw input:checked+i{background:var(--on)}
+.sw input:checked+i:after{transform:translateX(28px)}
+.sw input:focus-visible+i{outline:3px solid var(--ac);outline-offset:3px}
+h2{font-size:17px;margin:34px 0 4px}
+.hint{margin:0 0 14px;color:var(--mut);font-size:14px}
+input[type=password]{width:100%;padding:14px;border-radius:14px;border:1px solid var(--ln);background:var(--sf);color:var(--tx);font:inherit;margin-bottom:10px}
+input[type=password]:focus{outline:2px solid var(--ac);border-color:transparent}
+.btn{width:100%;border:0;border-radius:14px;padding:14px;background:var(--ac);color:#fff;font:inherit;font-weight:600;cursor:pointer}
+.btn:disabled{opacity:.5}
+#login{display:none;padding-top:12vh}
+#app{display:none}
+.toast{position:fixed;left:50%;bottom:24px;transform:translate(-50%,30px);background:#242650;color:var(--tx);padding:12px 18px;border-radius:14px;font-size:14px;opacity:0;pointer-events:none;transition:.25s;max-width:90vw;text-align:center}
+.toast.show{opacity:1;transform:translate(-50%,0)}.toast.bad{background:#4a1d2b;color:#ffc4cf}
+@media (prefers-reduced-motion:reduce){*{transition:none!important}}
+</style></head><body><div class="wrap">
+<div id="login"><h1>Đăng nhập</h1><p class="hint">Nhập mật khẩu bảng điều khiển để quản lý bot.</p>
+<input id="pw" type="password" placeholder="Mật khẩu" autocomplete="current-password">
+<button class="btn" onclick="doLogin()">Vào bảng điều khiển</button></div>
+<div id="app"><header><div><h1>Bot của bạn</h1><p class="summary" id="sum"></p></div><button class="ghost" onclick="logout()">Đăng xuất</button></header>
+<div class="panel" id="list"></div>
+<h2>Thêm bot</h2><p class="hint">Dán token bot Discord. Bot sẽ đăng nhập và chạy ngay.</p>
+<input id="tk" type="password" placeholder="Token bot" autocomplete="off">
+<button class="btn" id="addb" onclick="add()">Thêm và chạy</button></div>
+</div><div class="toast" id="toast"></div>
 <script>
 var K=sessionStorage.getItem('k')||'';
-function api(m,u,b){return fetch(u,{method:m,headers:{'Content-Type':'application/json','x-panel-key':K},body:b?JSON.stringify(b):undefined}).then(function(r){return r.json().then(function(j){if(r.status==401){K='';sessionStorage.removeItem('k');}if(!r.ok)throw new Error(j.error||'Lỗi');return j;});});}
-function say(t){document.getElementById('msg').textContent=t;}
+function $(i){return document.getElementById(i)}
+function toast(t,bad){var e=$('toast');e.textContent=t;e.className='toast show'+(bad?' bad':'');clearTimeout(window._t);window._t=setTimeout(function(){e.className='toast'},3200)}
+function api(m,u,b){return fetch(u,{method:m,headers:{'Content-Type':'application/json','x-panel-key':K},body:b?JSON.stringify(b):undefined}).then(function(r){return r.json().catch(function(){return {}}).then(function(j){if(r.status==401){logout(true)}if(!r.ok)throw new Error(j.error||'Có lỗi xảy ra');return j})})}
+function view(login){$('login').style.display=login?'block':'none';$('app').style.display=login?'none':'block'}
+function logout(bad){K='';sessionStorage.removeItem('k');view(true);if(bad)toast('Sai mật khẩu, thử lại',true)}
+function doLogin(){K=$('pw').value;sessionStorage.setItem('k',K);load()}
+$('pw').addEventListener('keydown',function(e){if(e.key==='Enter')doLogin()});
+function row(b){
+ var d=document.createElement('div');d.className='bot'+(b.online?' on':'');
+ var av=document.createElement('div');av.className='av';av.textContent=(b.name||'?').charAt(0).toUpperCase();
+ var info=document.createElement('div');info.className='info';
+ var n=document.createElement('div');n.className='name';n.textContent=b.name;
+ var s=document.createElement('div');s.className='sub';
+ var dot=document.createElement('span');dot.className='dot';
+ var st=document.createElement('span');st.className='st';st.textContent=b.online?'Đang chạy':'Đã tắt';
+ var tl=document.createElement('span');tl.textContent='Token '+b.tail;
+ s.appendChild(dot);s.appendChild(st);s.appendChild(tl);
+ info.appendChild(n);info.appendChild(s);
+ if(b.id!=='main'){var x=document.createElement('button');x.className='del';x.textContent='Xóa bot';
+  x.onclick=function(){if(confirm('Xóa bot '+b.name+'?')){d.classList.add('busy');api('DELETE','/panel/api/bots/'+b.id).then(function(){toast('Đã xóa bot');load()}).catch(function(e){toast(e.message,true);load()})}};
+  info.appendChild(x)}
+ var sw=document.createElement('label');sw.className='sw';
+ var cb=document.createElement('input');cb.type='checkbox';cb.checked=b.enabled;cb.setAttribute('aria-label',(b.enabled?'Tắt ':'Bật ')+b.name);
+ cb.onchange=function(){d.classList.add('busy');api('POST','/panel/api/bots/'+b.id+'/toggle').then(function(){toast(cb.checked?'Đã bật bot':'Đã tắt bot');load()}).catch(function(e){toast(e.message,true);load()})};
+ var tr=document.createElement('i');sw.appendChild(cb);sw.appendChild(tr);
+ d.appendChild(av);d.appendChild(info);d.appendChild(sw);return d}
 function load(){
- if(!K){K=prompt('Mật khẩu bảng điều khiển:')||'';sessionStorage.setItem('k',K);}
+ if(!K){view(true);return}
  api('GET','/panel/api/bots').then(function(bots){
-  var l=document.getElementById('list');l.innerHTML='';
-  bots.forEach(function(b){
-   var d=document.createElement('div');d.className='card';
-   var r=document.createElement('div');r.className='row';
-   var t=document.createElement('div');t.innerHTML='<b></b><br><small></small>';
-   t.querySelector('b').textContent=(b.online?'🟢 ':'⚫ ')+b.name;
-   t.querySelector('small').textContent='Token: '+b.tail;
-   var a=document.createElement('div');
-   var bt=document.createElement('button');bt.className=b.enabled?'off':'on';bt.textContent=b.enabled?'Tắt':'Bật';
-   bt.onclick=function(){say('Đang xử lý...');api('POST','/panel/api/bots/'+b.id+'/toggle').then(load).catch(function(e){say(e.message);load();});};
-   a.appendChild(bt);
-   if(b.id!=='main'){var x=document.createElement('button');x.className='del';x.textContent='Xóa';x.style.marginLeft='6px';x.onclick=function(){if(confirm('Xóa bot này?'))api('DELETE','/panel/api/bots/'+b.id).then(load).catch(function(e){say(e.message);});};a.appendChild(x);}
-   r.appendChild(t);r.appendChild(a);d.appendChild(r);l.appendChild(d);
-  });say('');
- }).catch(function(e){say(e.message);});
-}
-function add(){var i=document.getElementById('tk');say('Đang thêm bot...');api('POST','/panel/api/bots',{token:i.value}).then(function(){i.value='';load();}).catch(function(e){say(e.message);});}
+  view(false);var l=$('list');l.innerHTML='';
+  bots.forEach(function(b){l.appendChild(row(b))});
+  var on=bots.filter(function(b){return b.online}).length;
+  $('sum').innerHTML='<b>'+on+' đang chạy</b>, '+bots.length+' bot tất cả';
+ }).catch(function(e){toast(e.message,true)})}
+function add(){var i=$('tk'),b=$('addb');if(!i.value.trim()){toast('Hãy dán token bot trước',true);return}
+ b.disabled=true;b.textContent='Đang đăng nhập bot...';
+ api('POST','/panel/api/bots',{token:i.value}).then(function(){i.value='';toast('Đã thêm bot và đang chạy');load()}).catch(function(e){toast(e.message,true)}).then(function(){b.disabled=false;b.textContent='Thêm và chạy'})}
 load();
 </script></body></html>`;
 const running = new Map(); // id -> Client đang chạy
