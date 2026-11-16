@@ -239,6 +239,18 @@ async function getPublicIp() {
     return null;
 }
 
+// Gọi API rút gọn link, báo lỗi rõ ràng khi máy chủ trả về trang HTML thay vì JSON
+async function fetchShortener(label, url) {
+    const res = await fetch(url, {
+        headers: { 'User-Agent': 'Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Mobile Safari/537.36', 'Accept': 'application/json, text/plain, */*' },
+        signal: AbortSignal.timeout(15000)
+    });
+    const text = await res.text();
+    console.log(`[${label}] HTTP ${res.status}`, text.replace(/\s+/g, ' ').slice(0, 200));
+    try { return JSON.parse(text); }
+    catch { throw new Error(`${label} trả về trang lỗi (HTTP ${res.status}), có thể đang chặn máy chủ hoặc bảo trì.`); }
+}
+
 async function handleBuyCloud(interaction) {
     const raw = interaction.fields.getTextInputValue('info').trim();
     const i = raw.indexOf('|');
@@ -320,15 +332,13 @@ async function handleInteraction(interaction) {
             const targetUrl = `${process.env.RENDER_DOMAIN}/redeem?sid=${sessionId}`;
             let finalUrl = '';
             if (provider === 'link4m') {
-                const res = await fetch(`https://link4m.co/api-shorten/v2?api=${process.env.LINK4M_API_KEY}&url=${encodeURIComponent(targetUrl)}`, { headers: { 'User-Agent': 'Mozilla/5.0' }, signal: AbortSignal.timeout(15000) });
-                const data = await res.json();
+                const data = await fetchShortener('Link4M', `https://link4m.co/api-shorten/v2?api=${process.env.LINK4M_API_KEY}&url=${encodeURIComponent(targetUrl)}`);
                 if (data.status === "success" && data.shortenedUrl) finalUrl = data.shortenedUrl;
-                else throw new Error("Lỗi từ Link4M");
+                else throw new Error("Lỗi từ Link4M" + (data.message ? `: ${data.message}` : ''));
             } else {
-                const res = await fetch(`https://api.layma.net/api/admin/shortlink/quicklink?tokenUser=${process.env.LAYMA_TOKEN}&format=json&url=${encodeURIComponent(targetUrl)}`, { signal: AbortSignal.timeout(15000) });
-                const data = await res.json();
+                const data = await fetchShortener('LayMa', `https://api.layma.net/api/admin/shortlink/quicklink?tokenUser=${process.env.LAYMA_TOKEN}&format=json&url=${encodeURIComponent(targetUrl)}`);
                 if (data.success === true && data.html) finalUrl = data.html;
-                else throw new Error("Lỗi từ LayMa");
+                else throw new Error("Lỗi từ LayMa" + (data.message ? `: ${data.message}` : ''));
             }
             const embed = new EmbedBuilder().setColor(provider === 'link4m' ? 0xffc107 : 0x8b5cf6).setTitle(`🔗 LINK NHẬN XU (${provider.toUpperCase()})`).setDescription(`Bấm link nhận **50 xu**. Còn **${2 - (parseInt(currentCount) + 1)}** lượt.`).addFields({ name: 'Link', value: finalUrl });
             await interaction.editReply({ embeds: [embed] });
