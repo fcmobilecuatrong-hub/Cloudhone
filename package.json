@@ -2,10 +2,7 @@
   "name": "test-cli",
   "version": "1.0.0",
   "main": "server.js",
-  "engines": {
-  "node": "22.x"
-}
-"scripts": {
+  "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
