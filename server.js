@@ -3,7 +3,7 @@ const vm = require('vm');
 const express = require('express');
 const crypto = require('crypto');
 const Redis = require('ioredis');
-const { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder, EmbedBuilder, MessageFlags, Events, ModalBuilder, TextInputBuilder, TextInputStyle, ActionRowBuilder, StringSelectMenuBuilder } = require('discord.js');
+const { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder, EmbedBuilder, MessageFlags, Events, ModalBuilder, TextInputBuilder, TextInputStyle, ActionRowBuilder, StringSelectMenuBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
 
 if (!process.env.DISCORD_TOKEN) console.warn('⚠️ Không có DISCORD_TOKEN trong .env: bot chính sẽ không chạy, chỉ chạy các bot thêm từ bảng điều khiển.');
 process.on('unhandledRejection', err => console.error('[unhandledRejection]', err));
@@ -216,10 +216,17 @@ async function handleRegSelect(interaction) {
             .addFields(
                 { name: '📧 Tài khoản', value: `\`${mail}\`` },
                 { name: '🔑 Mật khẩu', value: `\`${pass}\`` },
-                { name: '🎁 Mã mời', value: `\`${code}\`` }
+                { name: '🎁 Mã mời', value: `\`${code}\`` },
+                { name: '💡 Mẹo', value: 'Bấm **📋 Sao chép**, nhấn giữ tin nhắn hiện ra rồi chọn **Sao chép văn bản**. Dán vào `/buycloud`, hoặc bấm **🛒 Mua ngay**.' }
             ).setFooter({ text: `Đã trừ 10 xu, số dư còn lại ${remaining} xu` });
         if (hasIcon(prov)) embed.setThumbnail(prov.icon);
-        await interaction.editReply({ content: null, embeds: [embed], components: [] });
+        const copyId = crypto.randomBytes(6).toString('hex');
+        await redis.set(`regcopy_${copyId}`, JSON.stringify({ userId, text: `${mail}|${pass}` }), 'EX', 1800);
+        const row = new ActionRowBuilder().addComponents(
+            new ButtonBuilder().setCustomId(`regcopy:${copyId}`).setLabel('Sao chép').setEmoji('📋').setStyle(ButtonStyle.Secondary),
+            new ButtonBuilder().setCustomId(`regbuy:${copyId}`).setLabel('Mua ngay').setEmoji('🛒').setStyle(ButtonStyle.Success)
+        );
+        await interaction.editReply({ content: null, embeds: [embed], components: [row] });
     } catch (error) {
         await interaction.editReply({ content: `❌ ${error.message}`, embeds: regEmbeds(), components: [regMenu(interaction.client)] });
     }
@@ -272,6 +279,32 @@ async function showBuyModal(interaction) {
     const name = CLOUD_PROVIDERS[t.provider].name;
     const modal = new ModalBuilder().setCustomId(`buycloud_modal:${t.id}`).setTitle(`Mua ${name}`.slice(0, 45));
     const input = new TextInputBuilder().setCustomId('info').setLabel('Nhập: email|matkhau').setPlaceholder('email@gmail.com|matkhau').setStyle(TextInputStyle.Short).setRequired(true).setMaxLength(300);
+    modal.addComponents(new ActionRowBuilder().addComponents(input));
+    return interaction.showModal(modal);
+}
+
+// Tạo link rút gọn bằng Link4M
+async function makeLink4m(targetUrl) {
+    const res = await fetch(`https://link4m.co/api-shorten/v2?api=${process.env.LINK4M_API_KEY}&url=${encodeURIComponent(targetUrl)}`, { headers: { 'User-Agent': 'Mozilla/5.0' }, signal: AbortSignal.timeout(15000) });
+    const data = await res.json();
+    if (data.status === "success" && data.shortenedUrl) return data.shortenedUrl;
+    throw new Error("Lỗi từ Link4M");
+}
+
+// Nút trong khung kết quả /reg: Sao chép (email|mk) và Mua ngay (mở form /buycloud điền sẵn)
+async function handleRegButton(interaction) {
+    const [action, id] = interaction.customId.split(':');
+    if (action !== 'regcopy' && action !== 'regbuy') return;
+    const raw = await redis.get(`regcopy_${id}`);
+    if (!raw) return interaction.reply({ content: '⏳ Dữ liệu đã hết hạn (quá 30 phút), hãy lấy tài khoản mới bằng /reg.', flags: MessageFlags.Ephemeral });
+    const data = JSON.parse(raw);
+    if (data.userId !== interaction.user.id) return interaction.reply({ content: '❌ Đây không phải tài khoản của bạn.', flags: MessageFlags.Ephemeral });
+    if (action === 'regcopy') {
+        // chỉ có đúng chuỗi email|mk để nhấn giữ và chọn "Sao chép văn bản" cho gọn
+        return interaction.reply({ content: data.text, flags: MessageFlags.Ephemeral });
+    }
+    const modal = new ModalBuilder().setCustomId('buycloud_modal:VM').setTitle('Mua VMOS Cloud');
+    const input = new TextInputBuilder().setCustomId('info').setLabel('Nhập: email|matkhau').setStyle(TextInputStyle.Short).setRequired(true).setMaxLength(300).setValue(data.text.slice(0, 300));
     modal.addComponents(new ActionRowBuilder().addComponents(input));
     return interaction.showModal(modal);
 }
@@ -330,6 +363,7 @@ async function handleBuyCloud(interaction) {
 }
 
 async function handleInteraction(interaction) {
+    if (interaction.isButton()) return handleRegButton(interaction);
     if (interaction.isStringSelectMenu() && interaction.customId === 'reg_select') return handleRegSelect(interaction);
     if (interaction.isStringSelectMenu() && interaction.customId === 'buycloud_select') return showBuyModal(interaction);
     if (interaction.isModalSubmit() && interaction.customId.startsWith('buycloud_modal:')) return handleBuyCloud(interaction);
@@ -356,17 +390,25 @@ async function handleInteraction(interaction) {
             await redis.set(`session_${sessionId}`, JSON.stringify({ userId, provider }), 'EX', 300);
             const targetUrl = `${process.env.RENDER_DOMAIN}/redeem?sid=${sessionId}`;
             let finalUrl = '';
+            let usedProvider = provider;
+            let fallbackNote = '';
             if (provider === 'link4m') {
-                const res = await fetch(`https://link4m.co/api-shorten/v2?api=${process.env.LINK4M_API_KEY}&url=${encodeURIComponent(targetUrl)}`, { headers: { 'User-Agent': 'Mozilla/5.0' }, signal: AbortSignal.timeout(15000) });
-                const data = await res.json();
-                if (data.status === "success" && data.shortenedUrl) finalUrl = data.shortenedUrl;
-                else throw new Error("Lỗi từ Link4M");
+                finalUrl = await makeLink4m(targetUrl);
             } else {
-                const data = await fetchLayma(`https://api.layma.net/api/admin/shortlink/quicklink?tokenUser=${encodeURIComponent(String(process.env.LAYMA_TOKEN || '').trim())}&format=json&url=${encodeURIComponent(targetUrl)}`);
-                if (data.success === true && data.html) finalUrl = data.html;
-                else throw new Error("Lỗi từ LayMa" + (data.message ? `: ${data.message}` : ''));
+                try {
+                    const data = await fetchLayma(`https://api.layma.net/api/admin/shortlink/quicklink?tokenUser=${encodeURIComponent(String(process.env.LAYMA_TOKEN || '').trim())}&format=json&url=${encodeURIComponent(targetUrl)}`);
+                    if (data.success === true && data.html) finalUrl = data.html;
+                    else throw new Error("Lỗi từ LayMa" + (data.message ? `: ${data.message}` : ''));
+                } catch (layErr) {
+                    // LayMa lỗi (ví dụ chặn IP) -> tự dùng Link4M thay thế
+                    console.log('[getlink] LayMa lỗi, dùng Link4M thay thế:', layErr.message);
+                    finalUrl = await makeLink4m(targetUrl);
+                    usedProvider = 'link4m';
+                    fallbackNote = '\n⚠️ LayMa đang lỗi nên bot dùng **Link4M** thay thế.';
+                    await redis.set(`session_${sessionId}`, JSON.stringify({ userId, provider: usedProvider }), 'EX', 300);
+                }
             }
-            const embed = new EmbedBuilder().setColor(provider === 'link4m' ? 0xffc107 : 0x8b5cf6).setTitle(`🔗 LINK NHẬN XU (${provider.toUpperCase()})`).setDescription(`Bấm link nhận **50 xu**. Còn **${2 - (parseInt(currentCount) + 1)}** lượt.`).addFields({ name: 'Link', value: finalUrl });
+            const embed = new EmbedBuilder().setColor(usedProvider === 'link4m' ? 0xffc107 : 0x8b5cf6).setTitle(`🔗 LINK NHẬN XU (${usedProvider.toUpperCase()})`).setDescription(`Bấm link nhận **50 xu**. Còn **${2 - (parseInt(currentCount) + 1)}** lượt.${fallbackNote}`).addFields({ name: 'Link', value: finalUrl });
             await interaction.editReply({ embeds: [embed] });
         } catch (e) {
             // lỗi lấy link -> trả lại lượt
