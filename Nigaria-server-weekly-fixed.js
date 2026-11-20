@@ -1435,7 +1435,7 @@ app.delete('/panel/api/update', panelAuth, deployAuth, async (req, res) => {
 setTimeout(() => redis.set('override_boot', '0').catch(() => {}), 60000);
 
 getPublicIp().then(ip => console.log('[IP] Địa chỉ IP máy chủ gọi ra ngoài:', ip || 'không lấy được'));
-require('./dashboard')(app, panelAuth);
+require('./dashboard')(app, panelAuth, { redis, getBots, startBot, stopBot, saveBot, tokenOf, botView, running });
 (async () => {
     try {
         for (const b of await getBots()) {
