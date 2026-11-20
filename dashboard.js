@@ -156,14 +156,22 @@ return tostring(amount)`;
         if (tok && /^[a-f0-9]{48}$/.test(tok)) {
             const raw = await redis.get('websess_' + tok);
             if (raw) {
-                const u = JSON.parse(raw);
-                u.admin = (await adminIds()).includes(u.id);
+                const s = JSON.parse(raw);
+                let u;
+                if (s.webId) { // tài khoản web tạo bằng token: chỉ có quyền sau khi /ketnoi
+                    const a = await redis.get('webacct_' + s.webId);
+                    if (a) { const d = JSON.parse(a); u = { id: d.discordId, name: d.name || 'Thành viên', avatar: d.avatar || '', linked: true, webId: s.webId }; }
+                    else u = { id: null, name: 'Khách', avatar: '', linked: false, webId: s.webId };
+                } else u = { ...s, linked: true }; // đăng nhập OAuth Discord
+                u.admin = !!u.id && (await adminIds()).includes(u.id);
                 req.user = u;
             }
         }
         next();
     }));
-    const userOnly = (req, res, next) => req.user ? next() : res.status(401).json({ error: 'Chưa đăng nhập' });
+    const userOnly = (req, res, next) => !req.user ? res.status(401).json({ error: 'Chưa đăng nhập' })
+        : req.user.linked ? next() : res.status(403).json({ error: 'Hãy liên kết Discord trước: vào Cài đặt, lấy token rồi gõ /ketnoi trong Discord.' });
+    const anyUser = (req, res, next) => req.user ? next() : res.status(401).json({ error: 'Chưa đăng nhập' });
     const adminOnly = (req, res, next) => {
         if (req.headers['x-panel-key']) return panelAuth(req, res, next);
         if (req.user && req.user.admin) return next();
@@ -177,6 +185,60 @@ return tostring(amount)`;
         res.json({ ok: true });
     }));
 
+    // ---------- Tài khoản web + token liên kết (/ketnoi) ----------
+    const TOK_ALPHA = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789', TOK_TTL = 7 * 86400;
+    const tokNorm = t => String(t).toUpperCase().replace(/[^A-Z0-9]/g, '');
+    const newToken = () => {
+        let t = '';
+        for (let i = 0; i < 12; i++) t += TOK_ALPHA[crypto.randomInt(TOK_ALPHA.length)];
+        return `NGA-${t.slice(0, 4)}-${t.slice(4, 8)}-${t.slice(8)}`;
+    };
+    async function issueToken(webId, force) {
+        if (!force) {
+            const cur = await redis.get('webtok_' + webId);
+            if (cur && await redis.exists('ketnoi_tok_' + tokNorm(cur))) return { token: cur, expiresIn: await redis.ttl('ketnoi_tok_' + tokNorm(cur)) };
+        }
+        const old = await redis.get('webtok_' + webId);
+        if (old) await redis.del('ketnoi_tok_' + tokNorm(old));
+        const token = newToken();
+        await redis.set('ketnoi_tok_' + tokNorm(token), webId, 'EX', TOK_TTL);
+        await redis.set('webtok_' + webId, token, 'EX', TOK_TTL);
+        return { token, expiresIn: TOK_TTL };
+    }
+    const clientIp = req => String(req.headers['x-forwarded-for'] || req.socket.remoteAddress || '').split(',')[0].trim();
+
+    app.post('/api/guest', wrap(async (req, res) => {
+        if (req.user) return res.json({ ok: true });
+        const ipKey = 'webguest_ip_' + clientIp(req).replace(/[^0-9a-fA-F:.]/g, '');
+        const n = await redis.incr(ipKey);
+        if (n === 1) await redis.expire(ipKey, 3600);
+        if (n > 20) throw fail('Bạn tạo quá nhiều tài khoản, thử lại sau 1 giờ.', 429);
+        const webId = crypto.randomBytes(8).toString('hex'), sid = crypto.randomBytes(24).toString('hex');
+        await redis.set('websess_' + sid, JSON.stringify({ webId }), 'EX', 30 * 86400);
+        setCookie(res, 'dsess', sid, 30 * 86400);
+        res.json({ ok: true });
+    }));
+
+    app.get('/api/link', anyUser, wrap(async (req, res) => {
+        const u = req.user;
+        if (u.linked) return res.json({ linked: true, via: u.webId ? 'token' : 'oauth', discord: { name: u.name, avatar: u.avatar } });
+        const t = await issueToken(u.webId, false);
+        res.json({ linked: false, token: t.token, expiresIn: t.expiresIn });
+    }));
+    app.post('/api/link/regen', anyUser, wrap(async (req, res) => {
+        if (!req.user.webId || req.user.linked) throw fail('Tài khoản này đã liên kết rồi.');
+        await cooldown(req.user.webId, 'regen', 3);
+        const t = await issueToken(req.user.webId, true);
+        res.json({ ok: true, token: t.token, expiresIn: t.expiresIn });
+    }));
+    app.post('/api/link/unlink', anyUser, wrap(async (req, res) => {
+        const u = req.user;
+        if (!u.webId || !u.linked) throw fail('Không có liên kết nào để hủy.');
+        await redis.del('webacct_' + u.webId);
+        await redis.srem('discord_webs_' + u.id, u.webId);
+        res.json({ ok: true });
+    }));
+
     const buyCost = () => parseInt(env('BUYCLOUD_COST') || '0', 10) || 0;
     const PROVIDERS = [
         { key: 'vmos', name: 'VMOS Cloud', cloud: 'VM', ready: true },
@@ -187,10 +249,11 @@ return tostring(amount)`;
     app.get('/api/me', (req, res, next) => req.user ? next() : adminOnly(req, res, next), wrap(async (req, res) => {
         const u = req.user || null;
         res.json({
-            user: u ? { id: u.id, name: u.name, avatar: u.avatar } : null,
+            user: u ? { id: u.linked ? u.id : null, name: u.name, avatar: u.avatar } : null,
+            linked: !!(u && u.linked),
             admin: !!(u ? u.admin : true),
-            coins: u ? await coinsOf(u.id) : 0,
-            dailyDone: u ? !!(await redis.exists(`daily_${u.id}_${todayVN()}`)) : false,
+            coins: u && u.linked ? await coinsOf(u.id) : 0,
+            dailyDone: u && u.linked ? !!(await redis.exists(`daily_${u.id}_${todayVN()}`)) : false,
             cfg: { regCost: 10, buyCost: buyCost(), providers: PROVIDERS }
         });
     }));
@@ -1133,6 +1196,8 @@ input,select{border:0;border-radius:18px;box-shadow:inset 0 2px 12px rgba(8,20,6
 .card:hover{transform:translateY(-1px)}
 
 /* Máy tính (chuột): bật bẻ cong ở rìa bằng SVG. Điện thoại bỏ để không lag. */
+.steps{margin:6px 0 10px 20px;padding:0}.steps li{margin:7px 0;line-height:1.5}
+.tok{font:700 21px/1.2 ui-monospace,Menlo,Consolas,monospace;letter-spacing:.1em;text-align:center;padding:16px 8px;user-select:all;-webkit-user-select:all}
 @media (hover:hover) and (pointer:fine){
   .card,#login .glass-box,.hdr,.sidebar,.toast{-webkit-backdrop-filter:url(#lg-big) saturate(1.6) brightness(1.04);backdrop-filter:url(#lg-big) saturate(1.6) brightness(1.04)}
   .btn,.ghost,.ham,.chip,.nav-item,input,select{-webkit-backdrop-filter:url(#lg-small) saturate(1.5) brightness(1.1);backdrop-filter:url(#lg-small) saturate(1.5) brightness(1.1)}
@@ -1146,6 +1211,8 @@ input,select{border:0;border-radius:18px;box-shadow:inset 0 2px 12px rgba(8,20,6
   .card,.btn,.nav-item{transition:none}
   .card:hover{transform:none}
 }
+/* Menu bên: kính đậm để chữ không bị nội dung phía sau đè lên */
+.sidebar{background:linear-gradient(160deg,rgba(26,42,96,.90),rgba(8,14,42,.94))!important;-webkit-backdrop-filter:blur(18px)!important;backdrop-filter:blur(18px)!important}
 </style>
 <svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
   <defs>
@@ -1162,8 +1229,9 @@ input,select{border:0;border-radius:18px;box-shadow:inset 0 2px 12px rgba(8,20,6
 <div id="login">
   <div class="glass-box">
   <h1>NIGARIA<span>_</span></h1>
-  <p class="hint">Đăng nhập để xem ví xu, đăng ký và mua cloud phone.</p>
-  <a id="dlogin" class="btn" style="display:block;text-decoration:none" href="/auth/discord">🎮 Đăng nhập Discord</a>
+  <p class="hint">Tạo tài khoản web, lấy token rồi gõ <b>/ketnoi</b> trong Discord để liên kết xu và mua cloud phone.</p>
+  <button class="btn ok" style="width:100%;padding:14px;margin-bottom:10px" onclick="startGuest()">✨ Bắt đầu và lấy token</button>
+  <a id="dlogin" class="btn" style="display:block;text-decoration:none" href="/auth/discord">🎮 Đã liên kết? Đăng nhập Discord</a>
   <details style="text-align:left;margin-top:14px"><summary class="hint" style="cursor:pointer">Admin: đăng nhập bằng mật khẩu</summary>
   <input id="pw" type="password" placeholder="Mật khẩu admin" autocomplete="current-password" style="margin:10px 0">
   <button class="btn" onclick="pwLogin()">Vào bằng mật khẩu</button></details>
@@ -1199,28 +1267,63 @@ function num(n){return Number(n||0).toLocaleString('vi-VN')}
 function link(u,t){return u?'<a href="'+esc(u)+'" target="_blank" rel="noopener">'+esc(t)+'</a>':esc(t)}
 function busy(b,p){b.disabled=true;return p.then(function(r){b.disabled=false;return r},function(e){b.disabled=false;throw e})}
 function showLogin(msg){$('app').style.display='none';$('login').style.display='block';if(msg)toast(msg,true)}
+function startGuest(){api('POST','/api/guest').then(function(){TAB='';boot()}).catch(function(e){toast(e.message,true)})}
 function pwLogin(){K=$('pw').value;sessionStorage.setItem('k',K);boot()}
 function logout(){K='';sessionStorage.removeItem('k');api('POST','/api/logout').catch(function(){}).then(function(){ME=null;location.reload()})}
 function toggleSide(){var s=$('sidebar'),o=$('overlay');s.classList.contains('open')?closeSide():(s.classList.add('open'),o.classList.add('show'))}
 function closeSide(){$('sidebar').classList.remove('open');$('overlay').classList.remove('show')}
 function boot(){api('GET','/api/me').then(function(m){ME=m;$('login').style.display='none';$('app').style.display='block';head();buildNav();if(ME.admin)api('GET','/api/admin/db/settings').then(function(d){var st=d.settings||{};DASH_REFRESH=Number(st.refreshSeconds)||0;if(!TAB&&st.defaultTab&&tabList().some(function(t){return t[0]===st.defaultTab}))TAB=st.defaultTab;startDashRefresh()}).catch(function(){}).finally(function(){go(TAB&&tabList().some(function(t){return t[0]===TAB})?TAB:tabList()[0][0])});else go(TAB&&tabList().some(function(t){return t[0]===TAB})?TAB:tabList()[0][0])}).catch(function(e){if(K){K='';sessionStorage.removeItem('k')}showLogin(e.status===401?'':e.message)})}
 function startDashRefresh(){if(window._dashRefreshTimer)clearInterval(window._dashRefreshTimer);if(DASH_REFRESH>0)window._dashRefreshTimer=setInterval(function(){if(TAB==='deploy')vDeploy();else if(TAB==='db')loadDatabase();else if(TAB==='notify')loadNotify()},DASH_REFRESH*1000)}
-function head(){var u=ME.user;var av=u&&u.avatar?u.avatar:'data:image/gif;base64,R0lGODlhAQABAAAAACw=';$('av').src=av;$('sav').src=av;$('snm').textContent=u?u.name:'Admin';$('hc').textContent=u?num(ME.coins)+' xu':'';$('shc').textContent=u?num(ME.coins)+' xu':'Admin'}
+function head(){var u=ME.user;var av=u&&u.avatar?u.avatar:'data:image/gif;base64,R0lGODlhAQABAAAAACw=';$('av').src=av;$('sav').src=av;$('snm').textContent=u?u.name:'Admin';$('hc').textContent=u&&ME.linked?num(ME.coins)+' xu':'';$('shc').textContent=u?(ME.linked?num(ME.coins)+' xu':'Chưa liên kết'):'Admin'}
 function refreshMe(){return api('GET','/api/me').then(function(m){ME=m;head();var b=$('bal');if(b)b.textContent=num(ME.coins)})}
-function tabList(){var t=[];if(ME.user){t.push(['wallet','💰','Ví xu'],['cloud','📱','Cloud Phone'],['top','🏆','Bảng xếp hạng'])}if(ME.admin){t.push(['deploy','🚀','Deploy'],['code','💻','GitHub'],['env','🔑','Biến MT'],['bots','🤖','Bot'],['gen','🎁','Gift Code'],['notify','📣','Thông báo'],['db','🗄️','Database'])}return t}
+function tabList(){var t=[];if(ME.user){if(ME.linked)t.push(['wallet','💰','Ví xu'],['cloud','📱','Cloud Phone'],['top','🏆','Bảng xếp hạng']);t.push(['settings','⚙️','Cài đặt'],['guide','📖','Hướng dẫn'])}if(ME.admin){t.push(['deploy','🚀','Deploy'],['code','💻','GitHub'],['env','🔑','Biến MT'],['bots','🤖','Bot'],['gen','🎁','Gift Code'],['notify','📣','Thông báo'],['db','🗄️','Database'])}return t}
 function buildNav(){
   var list=tabList();
   var user=list.filter(function(t){return ['wallet','cloud','top'].indexOf(t[0])>=0});
+  var acct=list.filter(function(t){return ['settings','guide'].indexOf(t[0])>=0});
   var admin=list.filter(function(t){return ['deploy','code','env','bots','gen','notify','db'].indexOf(t[0])>=0});
   var h='';
   if(user.length){h+='<div class="nav-label">Cloud Phone</div>';user.forEach(function(t){h+='<button class="nav-item'+(TAB===t[0]?' on':'')+'" data-tab="'+t[0]+'"><span class="nav-ico">'+t[1]+'</span>'+t[2]+'</button>'})}
+  if(acct.length){h+=(user.length?'<div class="nav-sep"></div>':'')+'<div class="nav-label">Tài khoản</div>';acct.forEach(function(t){h+='<button class="nav-item'+(TAB===t[0]?' on':'')+'" data-tab="'+t[0]+'"><span class="nav-ico">'+t[1]+'</span>'+t[2]+'</button>'})}
   if(admin.length){h+='<div class="nav-sep"></div><div class="nav-label">Quản trị</div>';admin.forEach(function(t){h+='<button class="nav-item'+(TAB===t[0]?' on':'')+'" data-tab="'+t[0]+'"><span class="nav-ico">'+t[1]+'</span>'+t[2]+'</button>'})}
   $('sideNav').innerHTML=h;
   Array.prototype.forEach.call(document.querySelectorAll('.nav-item[data-tab]'),function(b){b.addEventListener('click',function(){go(b.dataset.tab)})});
 }
-function go(t){TAB=t;buildNav();closeSide();M('<div class="m">Đang tải...</div>');({wallet:vWallet,cloud:vCloud,top:vTop,deploy:vDeploy,code:vCode,env:vEnv,bots:vBots,gen:vGen,notify:vNotify,db:vDatabase})[t]()}
+function go(t){clearInterval(window._lkTimer);TAB=t;buildNav();closeSide();M('<div class="m">Đang tải...</div>');({settings:vSettings,guide:vGuide,wallet:vWallet,cloud:vCloud,top:vTop,deploy:vDeploy,code:vCode,env:vEnv,bots:vBots,gen:vGen,notify:vNotify,db:vDatabase})[t]()}
 function M(h){$('main').innerHTML=h}
 function errBox(m){return '<div class="err">'+esc(m)+'</div>'}
+
+
+/* ---- Cài đặt: lấy token liên kết ---- */
+function vSettings(){
+ M('<div class="card"><h3>Liên kết Discord</h3><div id="lk"><div class="m">Đang tải...</div></div></div>'
+ +'<div class="card"><h3>Tài khoản web</h3><p class="hint">Đăng xuất chỉ thoát trình duyệt này. Xu và dữ liệu nằm theo tài khoản Discord nên không bị mất.</p><button class="btn bad sm" onclick="logout()">Đăng xuất</button></div>');
+ loadLink()}
+function loadLink(){api('GET','/api/link').then(function(d){var e=$('lk');if(!e)return;
+  if(d.linked){
+   e.innerHTML='<div class="top"><div class="who" style="display:flex;gap:12px;align-items:center;min-width:0"><img src="'+esc(d.discord.avatar||'data:image/gif;base64,R0lGODlhAQABAAAAACw=')+'" alt="" style="width:46px;height:46px;border-radius:50%;border:2px solid rgba(255,255,255,.7)"><div style="min-width:0"><div class="t">'+esc(d.discord.name)+'</div><div class="m">Đã liên kết với Discord</div></div></div><span class="chip ok">ĐÃ LIÊN KẾT</span></div>'
+   +'<p class="hint">Xu, điểm danh và đơn cloud trên web dùng chung với bot Discord.</p>'
+   +(d.via==='token'?'<div class="acts"><button class="btn bad sm" data-a="lunlink">Hủy liên kết</button></div>':'<p class="hint">Bạn đang đăng nhập bằng Discord.</p>');
+   return}
+  e.innerHTML='<p class="hint">Chưa liên kết. Làm 3 bước sau để dùng ví xu và cloud phone:</p>'
+   +'<ol class="steps"><li>Mở <b>Discord</b>, vào server của bot.</li><li>Gõ lệnh <b>/ketnoi</b>, ô <b>token</b> dán mã bên dưới rồi gửi.</li><li>Quay lại đây, trang tự cập nhật khi liên kết xong.</li></ol>'
+   +'<div class="kv tok" id="tokv">'+esc(d.token)+'</div>'
+   +'<div class="m" style="margin:2px 0 10px">Token dùng 1 lần, còn hiệu lực khoảng '+Math.max(1,Math.round(d.expiresIn/3600))+' giờ.</div>'
+   +'<div class="acts"><button class="btn sm ok" data-a="lcopy" data-t="'+esc(d.token)+'">Sao chép token</button><button class="btn sm" data-a="lregen">Tạo token mới</button></div>'
+   +'<p class="hint">Chỉ dùng token do chính bạn tạo. Không gửi token cho ai và không nhập token người khác đưa.</p>';
+  clearInterval(window._lkTimer);
+  window._lkTimer=setInterval(function(){if(TAB!=='settings')return clearInterval(window._lkTimer);api('GET','/api/me').then(function(m){if(m.linked){clearInterval(window._lkTimer);ME=m;head();toast('Liên kết thành công!');TAB='';buildNav();go(tabList()[0][0])}}).catch(function(){})},4000);
+ }).catch(function(e){var x=$('lk');if(x)x.innerHTML=errBox(e.message)})}
+
+/* ---- Hướng dẫn ---- */
+function vGuide(){
+ function box(t,b){return '<div class="card"><h3>'+t+'</h3>'+b+'</div>'}
+ M(box('1. Liên kết tài khoản','<ol class="steps"><li>Vào <b>Cài đặt</b> trên web, bấm sao chép token.</li><li>Trong Discord gõ <b>/ketnoi</b> và dán token.</li><li>Bot báo thành công là xong. Web hiện đủ Ví xu và Cloud Phone.</li></ol><p class="hint">Mỗi token chỉ dùng được 1 lần. Hết hạn thì vào Cài đặt bấm <b>Tạo token mới</b>.</p>')
+ +box('2. Kiếm xu','<ol class="steps"><li><b>/daily</b> hoặc nút Điểm danh trên web: +20 xu mỗi ngày.</li><li><b>/getlink</b> trong kênh nhiệm vụ: làm link nhận 50 xu, 2 lần mỗi ngày.</li><li><b>/youtube</b>: đăng ký kênh nhận xu mỗi ngày.</li><li><b>/code</b> hoặc ô Gift Code trên web: nhập mã quà.</li></ol>')
+ +box('3. Lấy tài khoản (reg)','<ol class="steps"><li>Vào <b>Cloud Phone</b>, chọn VMOS Cloud hoặc VSPhone.</li><li>Mỗi lần lấy tốn <b>10 xu</b>, lỗi sẽ tự hoàn xu.</li><li>Bấm <b>Điền vào form mua</b> để chuyển sang bước mua.</li></ol>')
+ +box('4. Mua cloud','<ol class="steps"><li>Chọn loại cloud, nhập <b>email|matkhau</b> của tài khoản đã lấy.</li><li>Bấm <b>Mua ngay</b>, chờ bot xử lý. Kết quả xem ở mục Đơn gần đây.</li></ol>')
+ +box('5. Chuyển xu','<p class="hint">Ví xu có ô chuyển xu bằng ID Discord, phí 5%. Lấy ID: bật Chế độ nhà phát triển trong Discord, bấm giữ tên người đó rồi chọn Sao chép ID.</p>')
+ +box('Hỏi nhanh','<ol class="steps"><li><b>Token báo sai:</b> kiểm tra lại, chú ý chữ O và số 0. Token đã dùng hoặc hết hạn thì tạo mới.</li><li><b>Mất đăng nhập web:</b> bấm Bắt đầu để tạo tài khoản web mới rồi /ketnoi lại. Xu không mất vì gắn với Discord.</li><li><b>Nghi ngờ lộ token:</b> bấm Hủy liên kết ở Cài đặt, hoặc gõ <b>/ngatketnoi</b> trong Discord.</li></ol>'))}
 
 /* ---- Ví ---- */
 function vWallet(){var c=ME.cfg;
@@ -1352,6 +1455,9 @@ document.addEventListener('click',function(ev){
  else if(a==='renderrollback'){if(!confirm('Deploy lại commit '+b.dataset.commit+'?'))return;var svc=b.closest('.card')&&b.closest('.card').dataset.service;if(!svc){toast('Thiếu service ID, hãy mở lại lịch sử từ thẻ service',true);return}busy(b,api('POST','/api/admin/render/'+svc+'/rollback',{commitId:b.dataset.commit})).then(done('Đã gửi deploy commit cũ',function(){setTimeout(vDeploy,3000)})).catch(bad)}
  else if(a==='railrollback'){if(!confirm('Rollback Railway về deployment này?'))return;busy(b,api('POST','/api/admin/railway/rollback',{deploymentId:b.dataset.id})).then(done('Đã gửi rollback',function(){setTimeout(vDeploy,3000)})).catch(bad)}
  else if(a==='railredeploy'){busy(b,api('POST','/api/admin/railway/redeploy',{serviceId:'',environmentId:''})).catch(bad)}
+ else if(a==='lcopy'){var tt=b.dataset.t;(navigator.clipboard?navigator.clipboard.writeText(tt):Promise.reject()).then(function(){toast('Đã sao chép token')}).catch(function(){var el=$('tokv');if(el){var r=document.createRange();r.selectNodeContents(el);var sl=getSelection();sl.removeAllRanges();sl.addRange(r)}toast('Hãy giữ và sao chép token đang được chọn',true)})}
+ else if(a==='lregen'){busy(b,api('POST','/api/link/regen',{})).then(function(){toast('Đã tạo token mới');loadLink()}).catch(bad)}
+ else if(a==='lunlink'){if(!confirm('Hủy liên kết Discord? Bạn sẽ phải lấy token và /ketnoi lại.'))return;busy(b,api('POST','/api/link/unlink',{})).then(function(){toast('Đã hủy liên kết');return api('GET','/api/me')}).then(function(m){ME=m;head();TAB='';buildNav();go(tabList()[0][0])}).catch(bad)}
 });
 $('pw').addEventListener('keydown',function(e){if(e.key==='Enter')pwLogin()});
 boot();
