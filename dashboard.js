@@ -802,8 +802,29 @@ return tostring(amount)`;
         res.json({ codes });
     }));
 
+    // Ảnh nền kính: đặt file dashboard-bg.jpg cạnh dashboard.js (không có thì dùng nền gradient)
+    app.get('/dash-bg.jpg', (req, res) => {
+        res.set('Cache-Control', 'public, max-age=86400');
+        res.sendFile(require('path').join(__dirname, 'dashboard-bg.jpg'), err => {
+            if (err && !res.headersSent) res.status(404).end();
+        });
+    });
     app.get('/dashboard', (req, res) => res.type('html').send(DASH_HTML));
 };
+
+// Bản đồ khúc xạ cho hiệu ứng Liquid Glass: giữa = phẳng (xám 128), rìa = bẻ ánh sáng vào trong
+const LG_MAP = 'data:image/svg+xml,' + encodeURIComponent(
+    "<svg xmlns='http://www.w3.org/2000/svg' width='200' height='200' viewBox='0 0 200 200' preserveAspectRatio='none'>" +
+    "<defs>" +
+    "<linearGradient id='l' x1='0' x2='1' y1='0' y2='0'><stop offset='0' stop-color='rgb(0,128,128)'/><stop offset='1' stop-color='rgb(128,128,128)'/></linearGradient>" +
+    "<linearGradient id='r' x1='0' x2='1' y1='0' y2='0'><stop offset='0' stop-color='rgb(128,128,128)'/><stop offset='1' stop-color='rgb(255,128,128)'/></linearGradient>" +
+    "<linearGradient id='t' x1='0' x2='0' y1='0' y2='1'><stop offset='0' stop-color='rgb(128,0,128)'/><stop offset='1' stop-color='rgb(128,128,128)'/></linearGradient>" +
+    "<linearGradient id='b' x1='0' x2='0' y1='0' y2='1'><stop offset='0' stop-color='rgb(128,128,128)'/><stop offset='1' stop-color='rgb(128,255,128)'/></linearGradient>" +
+    "</defs>" +
+    "<rect width='200' height='200' fill='rgb(128,128,128)'/>" +
+    "<rect width='24' height='200' fill='url(#l)'/><rect x='176' width='24' height='200' fill='url(#r)'/>" +
+    "<rect width='200' height='24' fill='url(#t)'/><rect y='176' width='200' height='24' fill='url(#b)'/>" +
+    "</svg>");
 
 const DASH_HTML = String.raw`<!doctype html><html lang="vi"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#0e0f1c">
@@ -945,7 +966,188 @@ textarea{font:12.5px/1.45 ui-monospace,Menlo,Consolas,monospace;min-height:55vh;
 .toast.bad{background:rgba(60,10,20,.85);color:#fca5a5;border-color:rgba(248,113,113,.3)}
 .evar{display:grid;grid-template-columns:1fr;gap:6px;padding:10px 0;border-top:1px solid var(--edge-s)}
 @media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
-</style></head><body>
+</style>
+<style id="aqua">
+/* ===== AQUA GLASS: kính trong veo như nước, ảnh nền xuyên qua kính ===== */
+:root{
+  --glass:rgba(255,255,255,.11);--glass-h:rgba(255,255,255,.18);
+  --edge:rgba(255,255,255,.42);--edge-s:rgba(255,255,255,.24);
+  --tx:#fff;--mut:rgba(255,255,255,.74);--ac:#cfe0ff;
+  --ok:#7dffc0;--bad:#ff9aa8;--warn:#ffe27a;
+  --blur:blur(14px) saturate(1.7) brightness(1.08);--blur-lg:blur(22px) saturate(1.8) brightness(1.1);
+  --sheen:linear-gradient(135deg,rgba(255,255,255,.34),rgba(255,255,255,.06) 38%,rgba(255,255,255,.02) 62%,rgba(255,255,255,.16));
+}
+html{background:#0b1226}
+body{background:transparent;color:var(--tx);text-shadow:0 1px 8px rgba(8,16,48,.38)}
+body::before{
+  background:
+    linear-gradient(180deg,rgba(6,12,34,.30),rgba(6,12,34,.52)),
+    url(/dash-bg.jpg) center top/cover no-repeat,
+    linear-gradient(140deg,#1b2a5c,#4d6fb8 45%,#0b1226);
+  transform:none;animation:none;z-index:-2;
+}
+body::after{
+  z-index:-1;
+  background:
+    radial-gradient(ellipse 420px 320px at 12% 18%,rgba(190,225,255,.22),transparent 70%),
+    radial-gradient(ellipse 380px 300px at 88% 78%,rgba(210,190,255,.20),transparent 70%),
+    radial-gradient(ellipse 260px 200px at 70% 10%,rgba(255,255,255,.12),transparent 70%);
+  animation:aqua 14s ease-in-out infinite alternate;
+}
+@keyframes aqua{0%{opacity:.65;transform:translate3d(0,0,0) scale(1)}100%{opacity:1;transform:translate3d(-10px,14px,0) scale(1.08)}}
+
+/* Kính */
+.card,#login .glass-box{
+  position:relative;overflow:hidden;
+  background:var(--sheen),var(--glass);
+  -webkit-backdrop-filter:var(--blur);backdrop-filter:var(--blur);
+  border:1px solid var(--edge);border-radius:26px;
+  box-shadow:0 14px 44px rgba(10,24,70,.38),inset 0 1.5px 0 rgba(255,255,255,.65),inset 0 -1px 0 rgba(255,255,255,.12),inset 0 0 34px rgba(255,255,255,.07);
+  transition:transform .25s,border-color .25s,box-shadow .25s;
+}
+.card::before,#login .glass-box::before{
+  content:'';position:absolute;inset:0;pointer-events:none;border-radius:inherit;
+  background:linear-gradient(115deg,rgba(255,255,255,.28) 0%,rgba(255,255,255,0) 22%),
+             radial-gradient(120% 60% at 0% 0%,rgba(255,255,255,.16),transparent 60%);
+  mix-blend-mode:soft-light;
+}
+.card>*,#login .glass-box>*{position:relative}
+.card:hover{border-color:rgba(255,255,255,.62);box-shadow:0 18px 52px rgba(10,24,70,.46),inset 0 1.5px 0 rgba(255,255,255,.8),inset 0 0 40px rgba(255,255,255,.1)}
+.card h3{color:rgba(255,255,255,.82);letter-spacing:.14em}
+.big{background:linear-gradient(135deg,#fff,#ffe9a8 60%,#ffd166);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;text-shadow:none;filter:drop-shadow(0 2px 10px rgba(255,200,80,.35))}
+
+/* Header + sidebar */
+.hdr{background:linear-gradient(180deg,rgba(255,255,255,.2),rgba(255,255,255,.07));border-bottom:1px solid var(--edge);-webkit-backdrop-filter:var(--blur-lg);backdrop-filter:var(--blur-lg);box-shadow:0 6px 28px rgba(10,24,70,.28),inset 0 1px 0 rgba(255,255,255,.5)}
+.hdr-logo{background:linear-gradient(90deg,#fff,#d6e6ff 55%,#e6d9ff);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;text-shadow:none}
+.ham{background:rgba(255,255,255,.16);border:1px solid var(--edge);color:#fff;box-shadow:inset 0 1px 0 rgba(255,255,255,.5)}
+.ham:hover{background:rgba(255,255,255,.28)}
+#av,.side-head img{border:2px solid rgba(255,255,255,.7);box-shadow:0 0 18px rgba(190,220,255,.5)}
+.coin{color:#ffe27a;text-shadow:0 0 14px rgba(255,214,102,.6)}
+.overlay{background:rgba(6,12,34,.38);-webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px)}
+.sidebar{background:linear-gradient(160deg,rgba(255,255,255,.22),rgba(255,255,255,.07));border-right:1px solid var(--edge);-webkit-backdrop-filter:var(--blur-lg);backdrop-filter:var(--blur-lg);box-shadow:12px 0 44px rgba(8,18,56,.4),inset -1px 0 0 rgba(255,255,255,.3)}
+.side-head,.side-foot{border-color:var(--edge-s)}
+.side-name{color:#fff}
+.side-coin{color:#ffe27a}
+.nav-label{color:rgba(255,255,255,.62)}
+.nav-item{color:rgba(255,255,255,.82);border-radius:14px;margin:2px 8px;width:calc(100% - 16px)}
+.nav-item:hover{background:rgba(255,255,255,.18);color:#fff}
+.nav-item.on{background:linear-gradient(135deg,rgba(255,255,255,.36),rgba(255,255,255,.12));border:1px solid rgba(255,255,255,.55);border-right:1px solid rgba(255,255,255,.55);color:#fff;box-shadow:inset 0 1px 0 rgba(255,255,255,.7),0 4px 16px rgba(10,24,70,.25)}
+.nav-sep{background:var(--edge-s)}
+.side-logout{background:rgba(255,120,140,.16);border:1px solid rgba(255,170,185,.5);color:#ffd2d9}
+.side-logout:hover{background:rgba(255,120,140,.3);color:#fff}
+
+/* Nút */
+.btn{border:1px solid rgba(255,255,255,.55);color:#fff;text-shadow:0 1px 4px rgba(10,24,70,.45);
+  background:linear-gradient(135deg,rgba(255,255,255,.42),rgba(150,190,255,.18) 55%,rgba(255,255,255,.2));
+  -webkit-backdrop-filter:blur(10px);backdrop-filter:blur(10px);
+  box-shadow:0 6px 20px rgba(14,30,84,.32),inset 0 1.5px 0 rgba(255,255,255,.75),inset 0 -1px 0 rgba(255,255,255,.15)}
+.btn:not(:disabled):hover{transform:translateY(-2px);box-shadow:0 10px 28px rgba(14,30,84,.42),inset 0 1.5px 0 rgba(255,255,255,.9);filter:brightness(1.12)}
+.btn.ok{background:linear-gradient(135deg,rgba(125,255,192,.5),rgba(40,190,120,.2) 55%,rgba(255,255,255,.18));border-color:rgba(160,255,210,.7)}
+.btn.bad{background:linear-gradient(135deg,rgba(255,140,160,.52),rgba(220,60,90,.22) 55%,rgba(255,255,255,.16));border-color:rgba(255,185,196,.7)}
+.btn.ok:not(:disabled):hover,.btn.bad:not(:disabled):hover{box-shadow:0 10px 28px rgba(14,30,84,.42),inset 0 1.5px 0 rgba(255,255,255,.9)}
+.ghost{background:rgba(255,255,255,.14);border:1px solid var(--edge);color:#fff;box-shadow:inset 0 1px 0 rgba(255,255,255,.45)}
+.ghost:hover{background:rgba(255,255,255,.26);color:#fff}
+
+/* Ô nhập */
+input,select,textarea{background:rgba(255,255,255,.14);border:1px solid rgba(255,255,255,.38);color:#fff;text-shadow:none;
+  box-shadow:inset 0 2px 10px rgba(10,24,70,.18),inset 0 1px 0 rgba(255,255,255,.25)}
+input:focus,select:focus,textarea:focus{border-color:rgba(255,255,255,.85);box-shadow:0 0 0 3px rgba(190,220,255,.35),inset 0 2px 10px rgba(10,24,70,.15);background:rgba(255,255,255,.2)}
+input::placeholder,textarea::placeholder{color:rgba(255,255,255,.58)}
+select option{background:#1d2a52;color:#fff}
+
+/* Chữ, nhãn, khối nhỏ */
+.t{color:#fff}.m a,.t a{color:#d6e6ff;text-decoration:underline;text-decoration-color:rgba(214,230,255,.35)}
+.hint{color:var(--mut)}
+.li,.evar{border-top-color:var(--edge-s)}
+.kv{background:rgba(8,16,48,.32);border:1px solid var(--edge-s);color:#eaf2ff;text-shadow:none}
+.chip{-webkit-backdrop-filter:blur(8px);backdrop-filter:blur(8px);box-shadow:inset 0 1px 0 rgba(255,255,255,.3)}
+.ok.chip,.cok{color:#b9ffdc;border-color:rgba(160,255,210,.7);background:rgba(60,220,150,.22)}
+.bad.chip{color:#ffd0d7;border-color:rgba(255,170,185,.7);background:rgba(255,90,120,.24)}
+.warn.chip{color:#fff0b0;border-color:rgba(255,226,122,.7);background:rgba(255,200,60,.22)}
+.off.chip{color:#fff;border-color:rgba(255,255,255,.45);background:rgba(255,255,255,.14)}
+.err{background:rgba(255,90,120,.24);color:#fff;border:1px solid rgba(255,170,185,.7)}
+
+/* Đăng nhập + thông báo */
+#login h1{background:linear-gradient(90deg,#fff,#cfe0ff 60%,#e6d9ff);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;text-shadow:none;filter:drop-shadow(0 4px 16px rgba(190,220,255,.5))}
+.toast{background:linear-gradient(135deg,rgba(255,255,255,.34),rgba(255,255,255,.14));color:#fff;border:1px solid rgba(255,255,255,.65);-webkit-backdrop-filter:var(--blur-lg);backdrop-filter:var(--blur-lg);box-shadow:0 12px 40px rgba(10,24,70,.45),inset 0 1.5px 0 rgba(255,255,255,.75)}
+.toast.bad{background:linear-gradient(135deg,rgba(255,120,145,.55),rgba(255,255,255,.14));color:#fff;border-color:rgba(255,190,200,.8)}
+::selection{background:rgba(190,220,255,.5)}
+::-webkit-scrollbar{width:8px;height:8px}::-webkit-scrollbar-thumb{background:rgba(255,255,255,.35);border-radius:8px}
+
+/* Trình duyệt cũ không hỗ trợ blur: tăng độ đục để vẫn đọc được */
+@supports not ((backdrop-filter:blur(1px)) or (-webkit-backdrop-filter:blur(1px))){
+  .card,#login .glass-box,.hdr,.sidebar,.toast{background:rgba(40,60,120,.62)}
+}
+/* ===== TRONG VEO: không làm mờ, nhìn xuyên thẳng qua kính ===== */
+:root{
+  --glass:rgba(10,20,52,.16);--mut:rgba(255,255,255,.88);
+  --sheen:linear-gradient(135deg,rgba(255,255,255,.20),rgba(255,255,255,.02) 34%,rgba(255,255,255,0) 62%,rgba(255,255,255,.10));
+  --blur:saturate(1.35) brightness(1.06);--blur-lg:saturate(1.45) brightness(1.08);
+}
+body::before{background:
+  linear-gradient(180deg,rgba(6,12,34,.14),rgba(6,12,34,.34)),
+  url(/dash-bg.jpg) center top/cover no-repeat,
+  linear-gradient(140deg,#1b2a5c,#4d6fb8 45%,#0b1226)}
+.card,#login .glass-box,.hdr,.sidebar,.toast,.btn,.chip,.ghost,.ham,input,select,textarea,.kv,.err,.overlay{
+  -webkit-backdrop-filter:saturate(1.3) brightness(1.05);backdrop-filter:saturate(1.3) brightness(1.05)}
+.overlay{background:rgba(6,12,34,.22)}
+.card,#login .glass-box{box-shadow:0 14px 44px rgba(10,24,70,.30),inset 0 1.5px 0 rgba(255,255,255,.85),inset 0 -1.5px 0 rgba(255,255,255,.28),inset 1px 0 0 rgba(255,255,255,.30),inset -1px 0 0 rgba(255,255,255,.18),inset 0 0 26px rgba(255,255,255,.05)}
+.hdr{background:linear-gradient(180deg,rgba(255,255,255,.14),rgba(255,255,255,.02))}
+.sidebar{background:linear-gradient(160deg,rgba(255,255,255,.14),rgba(255,255,255,.03))}
+.btn{background:linear-gradient(135deg,rgba(255,255,255,.30),rgba(170,205,255,.08) 55%,rgba(255,255,255,.14))}
+input,select,textarea{background:rgba(10,20,52,.18)}
+input::placeholder,textarea::placeholder{color:rgba(255,255,255,.78)}
+input:focus,select:focus,textarea:focus{background:rgba(255,255,255,.13)}
+.kv{background:rgba(8,16,48,.22)}
+/* chữ rõ hơn khi nền không còn bị làm mờ */
+body{text-shadow:0 1px 2px rgba(0,8,36,.75),0 0 14px rgba(0,8,36,.55)}
+.btn,.big,.hdr-logo,#login h1{text-shadow:none}
+.btn{text-shadow:0 1px 3px rgba(0,8,36,.7)}
+input,select,textarea{text-shadow:0 1px 2px rgba(0,8,36,.6)}
+@media(max-width:640px){.card{border-radius:22px}}
+</style>
+<style id="liquid">
+/* ===== LIQUID GLASS (kiểu iOS 26): rìa kính bẻ cong ánh sáng, viền sáng, nút viên thuốc ===== */
+:root{--glass:rgba(255,255,255,.02);--sheen:linear-gradient(135deg,rgba(255,255,255,.16),rgba(255,255,255,0) 40%,rgba(255,255,255,0) 62%,rgba(255,255,255,.12))}
+.card,#login .glass-box,.hdr,.sidebar,.toast{
+  -webkit-backdrop-filter:saturate(1.5) brightness(1.08);backdrop-filter:saturate(1.5) brightness(1.08);
+  -webkit-backdrop-filter:url(#lg-big) saturate(1.5) brightness(1.08);backdrop-filter:url(#lg-big) saturate(1.5) brightness(1.08);
+  background:var(--sheen),var(--glass);border:0;
+  box-shadow:0 16px 48px rgba(8,20,60,.28),0 2px 8px rgba(8,20,60,.14),inset 0 0 28px rgba(255,255,255,.10),inset 0 -10px 22px rgba(255,255,255,.07),inset 0 10px 22px rgba(255,255,255,.07);
+}
+.card,#login .glass-box{border-radius:30px}
+.btn,.ghost,.ham,.chip,.nav-item,input,select{
+  -webkit-backdrop-filter:saturate(1.5) brightness(1.1);backdrop-filter:saturate(1.5) brightness(1.1);
+  -webkit-backdrop-filter:url(#lg-small) saturate(1.5) brightness(1.1);backdrop-filter:url(#lg-small) saturate(1.5) brightness(1.1);
+}
+.btn,.ghost,.chip{border-radius:999px}
+.btn{padding:11px 22px;border:0;box-shadow:0 8px 22px rgba(8,20,60,.28),inset 0 0 18px rgba(255,255,255,.16),inset 0 -6px 12px rgba(255,255,255,.10)}
+.btn.sm{padding:8px 15px}
+input,select{border:0;border-radius:18px;box-shadow:inset 0 2px 12px rgba(8,20,60,.28),inset 0 0 0 1px rgba(255,255,255,.22)}
+.nav-item.on{border:0;box-shadow:inset 0 0 18px rgba(255,255,255,.2),0 4px 16px rgba(8,20,60,.22)}
+/* Viền sáng chéo: góc trên-trái và dưới-phải bắt sáng như mép kính thật */
+.card::after,#login .glass-box::after,.hdr::after,.sidebar::after,.btn::after,.ghost::after,.toast::after,input::after{
+  content:'';position:absolute;inset:0;border-radius:inherit;padding:1.4px;pointer-events:none;
+  background:linear-gradient(135deg,rgba(255,255,255,.95),rgba(255,255,255,.12) 28%,rgba(255,255,255,.04) 50%,rgba(255,255,255,.12) 72%,rgba(255,255,255,.9));
+  -webkit-mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);-webkit-mask-composite:xor;
+  mask:linear-gradient(#000 0 0) content-box exclude,linear-gradient(#000 0 0);mask-composite:exclude;
+}
+.btn,.ghost{position:relative}
+.hdr::after,.sidebar::after{border-radius:0;opacity:.6}
+.card:hover{transform:translateY(-1px)}
+</style>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
+  <defs>
+    <filter id="lg-big" x="0" y="0" width="1" height="1" color-interpolation-filters="sRGB">
+      <feImage href="${LG_MAP}" preserveAspectRatio="none" result="map"/>
+      <feDisplacementMap in="SourceGraphic" in2="map" scale="26" xChannelSelector="R" yChannelSelector="G"/>
+    </filter>
+    <filter id="lg-small" x="0" y="0" width="1" height="1" color-interpolation-filters="sRGB">
+      <feImage href="${LG_MAP}" preserveAspectRatio="none" result="map"/>
+      <feDisplacementMap in="SourceGraphic" in2="map" scale="9" xChannelSelector="R" yChannelSelector="G"/>
+    </filter>
+  </defs>
+</svg></head><body>
 <div id="login">
   <div class="glass-box">
   <h1>NIGARIA<span>_</span></h1>
