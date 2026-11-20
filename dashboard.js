@@ -350,7 +350,7 @@ return tostring(amount)`;
             try { const d = await render(`/services/${s.id}/deploys?limit=1`); if (d[0]) deploy = d[0].deploy || d[0]; } catch {}
             const url = s.serviceDetails && s.serviceDetails.url;
             return {
-                id: s.id, name: s.name, type: s.type,
+                id: s.id, name: s.name, type: s.type, ownerId: s.ownerId || '', region: s.region || '',
                 status: s.suspended === 'suspended' ? 'suspended' : (deploy ? deploy.status : 'unknown'),
                 url: url ? (url.startsWith('http') ? url : 'https://' + url) : '',
                 branch: s.branch || '',
@@ -448,13 +448,199 @@ return tostring(amount)`;
     }
     const settle = fn => Promise.resolve().then(fn).then(data => ({ ok: true, data }), e => ({ ok: false, error: e.message }));
 
+    // ---------- Redis database cho dashboard: lịch sử, cấu hình, audit ----------
+    const DBP = 'dash:v2:';
+    async function dbPush(key, value, max = 300) {
+        await redis.lpush(DBP + key, JSON.stringify(value));
+        await redis.ltrim(DBP + key, 0, max - 1);
+    }
+    async function audit(action, detail = {}) {
+        const safe = { action: String(action).slice(0, 80), detail, at: Date.now() };
+        await dbPush('audit', safe, 500).catch(e => console.warn('[dashboard audit]', e.message));
+    }
+    async function readJsonList(key, count = 100) {
+        return (await redis.lrange(DBP + key, 0, Math.max(0, count - 1))).map(x => {
+            try { return JSON.parse(x); } catch { return null; }
+        }).filter(Boolean);
+    }
+    async function saveInfraSnapshot(snapshot) {
+        const item = { at: Date.now(), snapshot };
+        await redis.set(DBP + 'last_snapshot', JSON.stringify(item));
+        await dbPush('snapshots', item, 100);
+    }
+    async function getRedisStats() {
+        const info = await redis.info('memory').catch(() => '');
+        const pick = k => { const m = info.match(new RegExp('^' + k + ':(.*)$', 'm')); return m ? m[1] : null; };
+        return {
+            connected: redis.status === 'ready', status: redis.status || 'unknown',
+            keys: await redis.dbsize().catch(() => null),
+            usedMemory: pick('used_memory_human'), peakMemory: pick('used_memory_peak_human'),
+            maxMemory: pick('maxmemory_human')
+        };
+    }
+
     app.get('/api/admin/overview', adminOnly, wrap(async (req, res) => {
         const [r, rw, g] = await Promise.all([settle(renderOverview), settle(railwayOverview), settle(githubOverview)]);
         res.json({ render: r, railway: rw, github: g, at: Date.now() });
     }));
+    app.get('/api/admin/infra/history', adminOnly, wrap(async (req, res) => {
+        const provider = String(req.query.provider || '');
+        if (provider === 'render') {
+            if (!/^srv-[a-z0-9]+$/i.test(String(req.query.serviceId || ''))) throw fail('Service ID Render không hợp lệ');
+            const rows = await render(`/services/${req.query.serviceId}/deploys?limit=20`);
+            res.json({ provider, list: (rows || []).map(x => x.deploy || x).map(d => ({
+                id: d.id, status: d.status, at: d.createdAt, finishedAt: d.finishedAt,
+                commit: d.commit && (d.commit.message || d.commit.id), commitId: d.commit && d.commit.id, trigger: d.trigger, dashboardUrl: d.dashboardUrl
+            })) });
+            return;
+        }
+        if (provider === 'railway') {
+            const ids = rwIds({ p: req.query.projectId, e: req.query.environmentId, s: req.query.serviceId });
+            const d = await gql(`query($input: DeploymentListInput!, $first: Int) { deployments(input:$input, first:$first) { edges { node { id status createdAt url staticUrl meta canRedeploy canRollback } } } }`, {
+                input: { projectId: ids.projectId, serviceId: ids.serviceId, environmentId: ids.environmentId }, first: 20
+            });
+            res.json({ provider, list: (d.deployments.edges || []).map(x => x.node) });
+            return;
+        }
+        throw fail('Provider không hợp lệ');
+    }));
+    app.get('/api/admin/infra/logs', adminOnly, wrap(async (req, res) => {
+        const provider = String(req.query.provider || '');
+        const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 50));
+        if (provider === 'render') {
+            const id = String(req.query.serviceId || '');
+            if (!/^srv-[a-z0-9]+$/i.test(id)) throw fail('Service ID Render không hợp lệ');
+            const services = await render('/services?limit=100');
+            const match = (services || []).map(x => x.service || x).find(x => x.id === id);
+            if (!match || !match.ownerId) throw fail('Không lấy được ownerId của service Render');
+            const q = new URLSearchParams({ ownerId: match.ownerId, resource: id, limit: String(limit), direction: 'backward' });
+            const start = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+            q.set('startTime', start); q.set('endTime', new Date().toISOString());
+            const logs = await render('/logs?' + q.toString());
+            res.json({ provider, logs: logs.logs || logs.items || logs });
+            return;
+        }
+        if (provider === 'railway') {
+            const id = String(req.query.deploymentId || '');
+            if (!UUID.test(id)) throw fail('Deployment ID Railway không hợp lệ');
+            // Railway exposes deployment logs via its GraphQL public API.
+            const d = await gql(`query($id:String!, $limit:Int) { deploymentLogs(deploymentId:$id, limit:$limit) { timestamp message severity } }`, { id, limit });
+            res.json({ provider, logs: d.deploymentLogs || [] });
+            return;
+        }
+        throw fail('Provider không hợp lệ');
+    }));
+    app.post('/api/admin/railway/rollback', adminOnly, wrap(async (req, res) => {
+        const id = String((req.body || {}).deploymentId || '');
+        if (!UUID.test(id)) throw fail('Deployment ID không hợp lệ');
+        const d = await gql(`mutation($id:String!) { deploymentRollback(id:$id) }`, { id });
+        if (d.deploymentRollback !== true) throw fail('Railway không xác nhận rollback');
+        await audit('railway.rollback', { deploymentId: id });
+        res.json({ ok: true, message: 'Đã gửi yêu cầu rollback Railway' });
+    }));
+    app.post('/api/admin/render/:id/restart', adminOnly, wrap(async (req, res) => {
+        if (!/^srv-[a-z0-9]+$/i.test(req.params.id)) throw fail('ID không hợp lệ');
+        await render(`/services/${req.params.id}/deploys`, { method: 'POST', body: JSON.stringify({ deployMode: 'deploy_only' }) });
+        await audit('render.restart', { serviceId: req.params.id });
+        res.json({ ok: true });
+    }));
+    app.post('/api/admin/render/:id/rollback', adminOnly, wrap(async (req, res) => {
+        if (!/^srv-[a-z0-9]+$/i.test(req.params.id)) throw fail('ID không hợp lệ');
+        const commitId = String((req.body || {}).commitId || '');
+        if (!/^[0-9a-f]{7,40}$/i.test(commitId)) throw fail('Commit ID không hợp lệ');
+        await render(`/services/${req.params.id}/deploys`, { method: 'POST', body: JSON.stringify({ commitId }) });
+        await audit('render.rollback', { serviceId: req.params.id, commitId });
+        res.json({ ok: true, message: 'Đã gửi deploy lại commit đã chọn' });
+    }));
+    app.get('/api/admin/db/summary', adminOnly, wrap(async (req, res) => {
+        const stats = await getRedisStats();
+        const last = await redis.get(DBP + 'last_snapshot');
+        let snapshot = null; try { snapshot = last ? JSON.parse(last) : null; } catch {}
+        res.json({ stats, lastSnapshot: snapshot, auditCount: await redis.llen(DBP + 'audit'), snapshotCount: await redis.llen(DBP + 'snapshots') });
+    }));
+    app.get('/api/admin/db/audit', adminOnly, wrap(async (req, res) => {
+        res.json({ list: await readJsonList('audit', Math.min(200, Math.max(1, Number(req.query.limit) || 60))) });
+    }));
+    app.get('/api/admin/db/snapshots', adminOnly, wrap(async (req, res) => {
+        res.json({ list: await readJsonList('snapshots', Math.min(100, Math.max(1, Number(req.query.limit) || 30))) });
+    }));
+    app.get('/api/admin/db/settings', adminOnly, wrap(async (req, res) => {
+        const raw = await redis.hgetall(DBP + 'settings');
+        const settings = {}; for (const [k, v] of Object.entries(raw || {})) { try { settings[k] = JSON.parse(v); } catch { settings[k] = v; } }
+        res.json({ settings });
+    }));
+    app.put('/api/admin/db/settings', adminOnly, wrap(async (req, res) => {
+        const allowed = new Set(['compactMode', 'refreshSeconds', 'defaultTab', 'notifyOnDeploy']);
+        const values = (req.body || {}).settings;
+        if (!values || typeof values !== 'object' || Array.isArray(values)) throw fail('Thiếu settings');
+        const pairs = [];
+        for (const [k, v] of Object.entries(values)) {
+            if (!allowed.has(k)) throw fail('Không cho phép lưu mục ' + k);
+            if (k === 'refreshSeconds' && (!Number.isInteger(v) || v < 0 || v > 300)) throw fail('refreshSeconds phải từ 0 đến 300');
+            if (k === 'defaultTab' && !['deploy', 'code', 'env', 'bots', 'gen', 'db', 'notify'].includes(v)) throw fail('Tab mặc định không hợp lệ');
+            pairs.push(k, JSON.stringify(v));
+        }
+        if (pairs.length) await redis.hset(DBP + 'settings', ...pairs);
+        await audit('dashboard.settings.update', { keys: Object.keys(values) });
+        res.json({ ok: true });
+    }));
+    app.post('/api/admin/db/snapshot', adminOnly, wrap(async (req, res) => {
+        const [r, rw, g] = await Promise.all([settle(renderOverview), settle(railwayOverview), settle(githubOverview)]);
+        const snap = { render: r, railway: rw, github: g };
+        await saveInfraSnapshot(snap);
+        await audit('infra.snapshot', { renderOk: r.ok, railwayOk: rw.ok, githubOk: g.ok });
+        res.json({ ok: true, at: Date.now() });
+    }));
+    app.get('/api/admin/notify/channels', adminOnly, wrap(async (req, res) => {
+        const client = ctx.running && ctx.running.get('main');
+        if (!client) throw fail('Bot Discord chính chưa chạy', 503);
+        const channels = [];
+        for (const [, guild] of client.guilds.cache) {
+            const list = await guild.channels.fetch().catch(() => null);
+            if (!list) continue;
+            for (const [, ch] of list) if (ch && ch.isTextBased && ch.isTextBased() && ch.guild) {
+                const me = guild.members.me;
+                const perms = me && ch.permissionsFor(me);
+                if (perms && perms.has('ViewChannel') && perms.has('SendMessages')) channels.push({ id: ch.id, name: '#' + ch.name, guild: guild.name });
+            }
+        }
+        const saved = await redis.hgetall(DBP + 'notify_destinations');
+        res.json({ channels, destinations: Object.entries(saved || {}).map(([id, raw]) => { try { return { id, ...JSON.parse(raw) }; } catch { return null; } }).filter(Boolean) });
+    }));
+    app.post('/api/admin/notify/destinations', adminOnly, wrap(async (req, res) => {
+        const name = String((req.body || {}).name || '').trim().slice(0, 50);
+        const channelId = String((req.body || {}).channelId || '').trim();
+        if (!name || !/^\d{15,22}$/.test(channelId)) throw fail('Tên hoặc Channel ID không hợp lệ');
+        const id = crypto.createHash('sha1').update(channelId).digest('hex').slice(0, 12);
+        await redis.hset(DBP + 'notify_destinations', id, JSON.stringify({ name, channelId }));
+        await audit('notify.destination.add', { name, channelId });
+        res.json({ ok: true, id });
+    }));
+    app.delete('/api/admin/notify/destinations/:id', adminOnly, wrap(async (req, res) => {
+        await redis.hdel(DBP + 'notify_destinations', String(req.params.id));
+        await audit('notify.destination.delete', { id: req.params.id });
+        res.json({ ok: true });
+    }));
+    app.get('/api/admin/notify/history', adminOnly, wrap(async (req, res) => {
+        res.json({ list: await readJsonList('notifications', 50) });
+    }));
+    app.post('/api/admin/notify/send', adminOnly, wrap(async (req, res) => {
+        const channelId = String((req.body || {}).channelId || '');
+        const message = String((req.body || {}).message || '').trim();
+        if (!/^\d{15,22}$/.test(channelId) || !message || message.length > 2000) throw fail('Kênh hoặc nội dung không hợp lệ');
+        const client = ctx.running && ctx.running.get('main');
+        if (!client) throw fail('Bot Discord chính chưa chạy', 503);
+        const ch = await client.channels.fetch(channelId).catch(() => null);
+        if (!ch || !ch.isTextBased || !ch.isTextBased() || typeof ch.send !== 'function') throw fail('Không tìm thấy kênh văn bản hoặc bot không truy cập được');
+        await ch.send({ content: message, allowedMentions: { parse: [] } });
+        await dbPush('notifications', { channelId, message, at: Date.now() }, 100);
+        await audit('discord.notify.send', { channelId, chars: message.length });
+        res.json({ ok: true });
+    }));
     app.post('/api/admin/render/:id/deploy', adminOnly, wrap(async (req, res) => {
         if (!/^srv-[a-z0-9]+$/i.test(req.params.id)) throw fail('ID không hợp lệ');
         await render(`/services/${req.params.id}/deploys`, { method: 'POST', body: '{}' });
+        await audit('render.deploy', { serviceId: req.params.id });
         res.json({ ok: true });
     }));
     const UUID = /^[0-9a-f-]{36}$/i;
@@ -462,11 +648,13 @@ return tostring(amount)`;
         const { serviceId, environmentId } = req.body || {};
         if (!UUID.test(String(serviceId)) || !UUID.test(String(environmentId))) throw fail('ID không hợp lệ');
         await gql(`mutation($s:String!,$e:String!){ serviceInstanceRedeploy(serviceId:$s, environmentId:$e) }`, { s: serviceId, e: environmentId });
+        await audit('railway.redeploy', { serviceId, environmentId });
         res.json({ ok: true });
     }));
     app.post('/api/admin/github/rerun/:runId', adminOnly, wrap(async (req, res) => {
         if (!/^\d+$/.test(req.params.runId)) throw fail('ID không hợp lệ');
         await gh(`/actions/runs/${req.params.runId}/rerun`, { method: 'POST' });
+        await audit('github.actions.rerun', { runId: req.params.runId });
         res.json({ ok: true });
     }));
 
@@ -488,67 +676,24 @@ return tostring(amount)`;
         const { path: p, content, sha, message } = req.body || {};
         if (!okPath(p)) throw fail('Đường dẫn không hợp lệ');
         if (typeof content !== 'string' || !content.length || content.length > 1500000) throw fail('Nội dung file không hợp lệ');
-        if (!/^[0-9a-f]{40}$/.test(String(sha))) throw fail('Thiếu mã phiên bản file, hãy tải lại file');
+        if (sha && !/^[0-9a-f]{40}$/.test(String(sha))) throw fail('Mã phiên bản file không hợp lệ, hãy tải lại file');
         if (/\.js$/.test(p)) { try { new vm.Script(content, { filename: p }); } catch (e) { throw fail('Lỗi cú pháp, chưa commit: ' + e.message); } }
         const r = await gh('/contents/' + p.split('/').map(encodeURIComponent).join('/'), {
             method: 'PUT',
-            body: JSON.stringify({ message: String(message || 'Cập nhật ' + p + ' từ dashboard').slice(0, 200), content: Buffer.from(content, 'utf8').toString('base64'), sha })
+            body: JSON.stringify({ message: String(message || ((sha ? 'Cập nhật ' : 'Tạo ') + p + ' từ dashboard')).slice(0, 200), content: Buffer.from(content, 'utf8').toString('base64'), ...(sha ? { sha } : {}) })
         });
+        await audit('github.file.commit', { path: p, commit: r.commit.sha.slice(0, 7) });
         res.json({ ok: true, sha: r.content.sha, commit: r.commit.sha.slice(0, 7) });
     }));
-
-
-    // ---------- Admin: thông báo Discord ----------
-    const NOTIFY_DEST_KEY = 'dashboard_notify_destinations';
-    async function mainDiscordClient() {
-        const c = ctx.running && ctx.running.get('main');
-        if (!c || !c.isReady()) throw fail('Bot chính chưa online, không thể gửi Discord.', 503);
-        return c;
-    }
-    app.get('/api/admin/notify/channels', adminOnly, wrap(async (req, res) => {
-        const c = await mainDiscordClient();
-        const rows = [];
-        for (const guild of c.guilds.cache.values()) {
-            let channels = guild.channels.cache;
-            try { channels = await guild.channels.fetch(); } catch {}
-            for (const ch of channels.values()) {
-                if (ch && ch.type === 0) rows.push({
-                    id: ch.id, name: ch.name, guild: guild.name,
-                    label: `${guild.name} / #${ch.name}`
-                });
-            }
-        }
-        const savedRaw = await redis.hgetall(NOTIFY_DEST_KEY);
-        const saved = Object.entries(savedRaw || {}).map(([id, raw]) => {
-            try { return { id, ...JSON.parse(raw) }; } catch { return null; }
-        }).filter(Boolean);
-        res.json({ channels: rows, saved });
-    }));
-    app.post('/api/admin/notify/destinations', adminOnly, wrap(async (req, res) => {
-        const name = String(req.body && req.body.name || '').trim().slice(0, 50);
-        const channelId = String(req.body && req.body.channelId || '').trim();
-        if (!name || !/^\d{15,22}$/.test(channelId)) throw fail('Nhập tên và ID kênh Discord hợp lệ.');
-        const c = await mainDiscordClient();
-        const ch = await c.channels.fetch(channelId);
-        if (!ch || ch.type !== 0 || !ch.guild) throw fail('ID này không phải kênh văn bản mà bot truy cập được.');
-        await redis.hset(NOTIFY_DEST_KEY, channelId, JSON.stringify({ name, guild: ch.guild.name, channel: ch.name }));
-        res.json({ ok: true, destination: { id: channelId, name, guild: ch.guild.name, channel: ch.name } });
-    }));
-    app.delete('/api/admin/notify/destinations/:id', adminOnly, wrap(async (req, res) => {
-        if (!/^\d{15,22}$/.test(req.params.id)) throw fail('ID kênh không hợp lệ.');
-        await redis.hdel(NOTIFY_DEST_KEY, req.params.id);
-        res.json({ ok: true });
-    }));
-    app.post('/api/admin/notify/send', adminOnly, wrap(async (req, res) => {
-        const channelId = String(req.body && req.body.channelId || '').trim();
-        const message = String(req.body && req.body.message || '').trim();
-        if (!/^\d{15,22}$/.test(channelId)) throw fail('Chọn kênh nhận thông báo.');
-        if (!message || message.length > 2000) throw fail('Nội dung phải từ 1 đến 2000 ký tự.');
-        const c = await mainDiscordClient();
-        const ch = await c.channels.fetch(channelId);
-        if (!ch || ch.type !== 0 || typeof ch.send !== 'function') throw fail('Không tìm thấy kênh văn bản hoặc bot không có quyền gửi.');
-        const sent = await ch.send({ content: message, allowedMentions: { parse: [] } });
-        res.json({ ok: true, messageId: sent.id, channel: `#${ch.name}` });
+    app.delete('/api/admin/gh/file', adminOnly, wrap(async (req, res) => {
+        const p = String((req.body || {}).path || '');
+        const sha = String((req.body || {}).sha || '');
+        if (!okPath(p) || !/^[0-9a-f]{40}$/.test(sha)) throw fail('Đường dẫn hoặc mã phiên bản file không hợp lệ');
+        const r = await gh('/contents/' + p.split('/').map(encodeURIComponent).join('/'), {
+            method: 'DELETE', body: JSON.stringify({ message: String((req.body || {}).message || ('Xóa ' + p + ' từ dashboard')).slice(0, 200), sha })
+        });
+        await audit('github.file.delete', { path: p });
+        res.json({ ok: true, commit: r.commit && r.commit.sha ? r.commit.sha.slice(0, 7) : '' });
     }));
 
     // ---------- Admin: biến môi trường ----------
@@ -562,12 +707,14 @@ return tostring(amount)`;
         const { key, value } = req.body || {};
         if (!/^srv-[a-z0-9]+$/i.test(req.params.id) || !envKey(key)) throw fail('Dữ liệu không hợp lệ');
         await render(`/services/${req.params.id}/env-vars/${key}`, { method: 'PUT', body: JSON.stringify({ value: String(value == null ? '' : value) }) });
+        await audit('render.env.update', { serviceId: req.params.id, key });
         res.json({ ok: true });
     }));
     app.delete('/api/admin/env/render/:id', adminOnly, wrap(async (req, res) => {
         const key = req.body && req.body.key;
         if (!/^srv-[a-z0-9]+$/i.test(req.params.id) || !envKey(key)) throw fail('Dữ liệu không hợp lệ');
         await render(`/services/${req.params.id}/env-vars/${key}`, { method: 'DELETE' });
+        await audit('render.env.delete', { serviceId: req.params.id, key });
         res.json({ ok: true });
     }));
     const rwIds = o => {
@@ -585,12 +732,14 @@ return tostring(amount)`;
         if (!envKey(req.body.key)) throw fail('Tên biến không hợp lệ');
         await gql(`mutation($i: VariableUpsertInput!){ variableUpsert(input:$i) }`,
             { i: { ...ids, name: req.body.key, value: String(req.body.value == null ? '' : req.body.value), skipDeploys: true } });
+        await audit('railway.env.update', { serviceId: ids.serviceId, key: req.body.key });
         res.json({ ok: true });
     }));
     app.delete('/api/admin/env/railway', adminOnly, wrap(async (req, res) => {
         const ids = rwIds(req.body);
         if (!envKey(req.body.key)) throw fail('Tên biến không hợp lệ');
         await gql(`mutation($i: VariableDeleteInput!){ variableDelete(input:$i) }`, { i: { ...ids, name: req.body.key } });
+        await audit('railway.env.delete', { serviceId: ids.serviceId, key: req.body.key });
         res.json({ ok: true });
     }));
 
@@ -658,7 +807,7 @@ return tostring(amount)`;
 
 const DASH_HTML = String.raw`<!doctype html><html lang="vi"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#0e0f1c">
-<title>Cloudhone Dashboard</title>
+<title>Nigaria Control Center</title>
 <style>
 :root{--bg:#0a0b18;--sf:#12152b;--ln:#1d2040;--tx:#eceeff;--mut:#6b7099;--ok:#4ade80;--ac:#6366f1;--bad:#f87171;--warn:#fbbf24}
 *{box-sizing:border-box;margin:0;padding:0}
@@ -760,7 +909,7 @@ textarea{font:12.5px/1.45 ui-monospace,Menlo,Consolas,monospace;min-height:55vh;
 </div>
 <div class="toast" id="toast"></div>
 <script>
-var K=sessionStorage.getItem('k')||'',ME=null,TAB='',OV=null,LAST=null,FILE=null,TOPS='all';
+var K=sessionStorage.getItem('k')||'',ME=null,TAB='',OV=null,LAST=null,FILE=null,TOPS='all',DASH_REFRESH=0;
 function $(i){return document.getElementById(i)}
 function esc(s){return String(s==null?'':s).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]})}
 function toast(t,bad){var e=$('toast');e.textContent=t;e.className='toast show'+(bad?' bad':'');clearTimeout(window._t);window._t=setTimeout(function(){e.className='toast'},3400)}
@@ -775,21 +924,22 @@ function pwLogin(){K=$('pw').value;sessionStorage.setItem('k',K);boot()}
 function logout(){K='';sessionStorage.removeItem('k');api('POST','/api/logout').catch(function(){}).then(function(){ME=null;location.reload()})}
 function toggleSide(){var s=$('sidebar'),o=$('overlay');s.classList.contains('open')?closeSide():(s.classList.add('open'),o.classList.add('show'))}
 function closeSide(){$('sidebar').classList.remove('open');$('overlay').classList.remove('show')}
-function boot(){api('GET','/api/me').then(function(m){ME=m;$('login').style.display='none';$('app').style.display='block';head();buildNav();go(TAB&&tabList().some(function(t){return t[0]===TAB})?TAB:tabList()[0][0])}).catch(function(e){if(K){K='';sessionStorage.removeItem('k')}showLogin(e.status===401?'':e.message)})}
+function boot(){api('GET','/api/me').then(function(m){ME=m;$('login').style.display='none';$('app').style.display='block';head();buildNav();if(ME.admin)api('GET','/api/admin/db/settings').then(function(d){var st=d.settings||{};DASH_REFRESH=Number(st.refreshSeconds)||0;if(!TAB&&st.defaultTab&&tabList().some(function(t){return t[0]===st.defaultTab}))TAB=st.defaultTab;startDashRefresh()}).catch(function(){}).finally(function(){go(TAB&&tabList().some(function(t){return t[0]===TAB})?TAB:tabList()[0][0])});else go(TAB&&tabList().some(function(t){return t[0]===TAB})?TAB:tabList()[0][0])}).catch(function(e){if(K){K='';sessionStorage.removeItem('k')}showLogin(e.status===401?'':e.message)})}
+function startDashRefresh(){if(window._dashRefreshTimer)clearInterval(window._dashRefreshTimer);if(DASH_REFRESH>0)window._dashRefreshTimer=setInterval(function(){if(TAB==='deploy')vDeploy();else if(TAB==='db')loadDatabase();else if(TAB==='notify')loadNotify()},DASH_REFRESH*1000)}
 function head(){var u=ME.user;var av=u&&u.avatar?u.avatar:'data:image/gif;base64,R0lGODlhAQABAAAAACw=';$('av').src=av;$('sav').src=av;$('snm').textContent=u?u.name:'Admin';$('hc').textContent=u?num(ME.coins)+' xu':'';$('shc').textContent=u?num(ME.coins)+' xu':'Admin'}
 function refreshMe(){return api('GET','/api/me').then(function(m){ME=m;head();var b=$('bal');if(b)b.textContent=num(ME.coins)})}
-function tabList(){var t=[];if(ME.user){t.push(['wallet','💰','Ví xu'],['cloud','📱','Cloud Phone'],['top','🏆','Bảng xếp hạng'])}if(ME.admin){t.push(['deploy','🚀','Deploy'],['code','💻','Sửa code'],['notify','📣','Thông báo'],['env','🔑','Biến MT'],['bots','🤖','Bot'],['gen','🎁','Gift Code'])}return t}
+function tabList(){var t=[];if(ME.user){t.push(['wallet','💰','Ví xu'],['cloud','📱','Cloud Phone'],['top','🏆','Bảng xếp hạng'])}if(ME.admin){t.push(['deploy','🚀','Deploy'],['code','💻','GitHub'],['env','🔑','Biến MT'],['bots','🤖','Bot'],['gen','🎁','Gift Code'],['notify','📣','Thông báo'],['db','🗄️','Database'])}return t}
 function buildNav(){
   var list=tabList();
   var user=list.filter(function(t){return ['wallet','cloud','top'].indexOf(t[0])>=0});
-  var admin=list.filter(function(t){return ['deploy','code','notify','env','bots','gen'].indexOf(t[0])>=0});
+  var admin=list.filter(function(t){return ['deploy','code','env','bots','gen','notify','db'].indexOf(t[0])>=0});
   var h='';
   if(user.length){h+='<div class="nav-label">Cloud Phone</div>';user.forEach(function(t){h+='<button class="nav-item'+(TAB===t[0]?' on':'')+'" data-tab="'+t[0]+'"><span class="nav-ico">'+t[1]+'</span>'+t[2]+'</button>'})}
   if(admin.length){h+='<div class="nav-sep"></div><div class="nav-label">Quản trị</div>';admin.forEach(function(t){h+='<button class="nav-item'+(TAB===t[0]?' on':'')+'" data-tab="'+t[0]+'"><span class="nav-ico">'+t[1]+'</span>'+t[2]+'</button>'})}
   $('sideNav').innerHTML=h;
   Array.prototype.forEach.call(document.querySelectorAll('.nav-item[data-tab]'),function(b){b.addEventListener('click',function(){go(b.dataset.tab)})});
 }
-function go(t){TAB=t;buildNav();closeSide();M('<div class="m">Đang tải...</div>');({wallet:vWallet,cloud:vCloud,top:vTop,deploy:vDeploy,code:vCode,notify:vNotify,env:vEnv,bots:vBots,gen:vGen})[t]()}
+function go(t){TAB=t;buildNav();closeSide();M('<div class="m">Đang tải...</div>');({wallet:vWallet,cloud:vCloud,top:vTop,deploy:vDeploy,code:vCode,env:vEnv,bots:vBots,gen:vGen,notify:vNotify,db:vDatabase})[t]()}
 function M(h){$('main').innerHTML=h}
 function errBox(m){return '<div class="err">'+esc(m)+'</div>'}
 
@@ -824,7 +974,7 @@ function chip(s){var k=String(s||'').toLowerCase();var c=CH[k]||['off',(s||'?').
 function ovRender(r){if(!r.ok)return errBox(r.error);if(!r.data.length)return '<div class="m">Không có service</div>';
  return r.data.map(function(s){return '<div class="card"><div class="top"><div style="min-width:0"><div class="t">'+esc(s.name)+'</div><div class="m">'+esc(s.project||s.type||'')+(s.environment?' · '+esc(s.environment):'')+(s.branch?' · '+esc(s.branch):'')+'</div></div>'+chip(s.status)+'</div>'
   +(s.commit?'<div class="m">'+esc(s.commit)+'</div>':'')+'<div class="m">'+ago(s.at)+(s.url?' · '+link(s.url,s.url.replace('https://','')):'')+'</div>'
-  +'<div class="acts">'+(s.projectId?'<button class="btn sm" data-a="rwdeploy" data-id="'+esc(s.id)+'" data-e="'+esc(s.environmentId)+'" data-n="'+esc(s.name)+'">Redeploy</button>':'<button class="btn sm" data-a="rdeploy" data-id="'+esc(s.id)+'" data-n="'+esc(s.name)+'">Deploy</button>')
+  +'<div class="acts">'+(s.projectId?'<button class="btn sm" data-a="rwdeploy" data-id="'+esc(s.id)+'" data-e="'+esc(s.environmentId)+'" data-n="'+esc(s.name)+'">Redeploy</button>':'<button class="btn sm" data-a="rdeploy" data-id="'+esc(s.id)+'" data-n="'+esc(s.name)+'">Deploy</button>')+'<button class="btn sm ghost" data-a="infraDetail" data-provider="'+(s.projectId?'railway':'render')+'" data-id="'+esc(s.id)+'" data-p="'+esc(s.projectId||'')+'" data-e="'+esc(s.environmentId||'')+'">Lịch sử / Logs</button>'+(s.projectId?'':'<button class="btn sm ghost" data-a="rrestart" data-id="'+esc(s.id)+'">Restart</button>')
   +'<a class="ghost" style="padding:7px 10px;font-size:12px" href="'+esc(s.dash)+'" target="_blank" rel="noopener">Log</a></div></div>'}).join('')}
 function ghRender(r){if(!r.ok)return errBox(r.error);var g=r.data;
  return '<div class="card"><div class="t">'+link(g.url,g.repo)+(g.private?' 🔒':'')+'</div><div class="m">Nhánh '+esc(g.branch)+' · Issue/PR mở '+g.issues+' · Push '+ago(g.pushedAt)+'</div></div>'
@@ -834,48 +984,32 @@ function ghRender(r){if(!r.ok)return errBox(r.error);var g=r.data;
 function vDeploy(){M('<div class="m">Đang tải...</div>');api('GET','/api/admin/overview').then(function(d){OV=d;
  M('<div class="grid"><div><h3 class="hint">RENDER</h3>'+ovRender(d.render)+'</div><div><h3 class="hint">RAILWAY</h3>'+ovRender(d.railway)+'</div><div><h3 class="hint">GITHUB</h3>'+ghRender(d.github)+'</div></div>')}).catch(function(e){M(errBox(e.message))})}
 
-/* ---- Sửa code ---- */
-function vCode(){FILE=null;M('<div class="card"><h3>Sửa file trên GitHub</h3><p class="hint">Commit xong Render tự deploy lại. File .js được kiểm tra cú pháp trước khi commit.</p><div class="row"><select id="cf"><option>Đang tải...</option></select><button class="btn" data-a="cload">Mở file</button></div></div><div id="ced"></div>');
- api('GET','/api/admin/gh/tree').then(function(d){$('cf').innerHTML=d.files.map(function(f){return '<option value="'+esc(f.path)+'">'+esc(f.path)+' ('+Math.ceil(f.size/1024)+' KB)</option>'}).join('')||'<option value="">Trống</option>'}).catch(function(e){$('cf').innerHTML='<option value="">Lỗi</option>';$('ced').innerHTML=errBox(e.message)})}
-function showEditor(){$('ced').innerHTML='<div class="card"><h3>'+esc(FILE.path)+'</h3><textarea id="ct" spellcheck="false" autocapitalize="off" autocomplete="off"></textarea><input id="cm" placeholder="Nội dung commit (tuỳ chọn)" style="margin:10px 0"><div class="acts"><button class="btn ok" data-a="csave">Commit và deploy</button><button class="btn ghost" data-a="cload">Tải lại</button></div></div>';$('ct').value=FILE.content}
-
-
+/* ---- Database / Redis ---- */
+function vDatabase(){M('<div class="card"><h3>Redis · Database dashboard</h3><div id="dbs" class="m">Đang kiểm tra...</div><div class="acts"><button class="btn sm" data-a="dbrefresh">Làm mới</button><button class="btn sm ok" data-a="dbsnapshot">Lưu snapshot hạ tầng</button></div></div><div class="card"><h3>Lịch sử thao tác admin</h3><div id="dbaudit" class="m">Đang tải...</div></div><div class="card"><h3>Snapshot hạ tầng</h3><div id="dbsnapshots" class="m">Đang tải...</div></div><div class="card"><h3>Cài đặt dashboard</h3><label class="hint">Tự làm mới (giây, 0 = tắt)</label><input id="dbrefreshsec" type="number" min="0" max="300" value="0"><label class="hint">Tab mặc định</label><select id="dbdefault"><option value="deploy">Deploy</option><option value="code">GitHub</option><option value="env">Biến môi trường</option><option value="bots">Bot</option><option value="gen">Gift Code</option><option value="notify">Thông báo</option><option value="db">Database</option></select><div class="acts"><button class="btn" data-a="dbsettings">Lưu cài đặt</button></div></div>');loadDatabase()}
+function loadDatabase(){api('GET','/api/admin/db/summary').then(function(d){$('dbs').innerHTML='<div class="kv">Redis: '+esc(d.stats.status)+' · Keys: '+esc(d.stats.keys)+' · RAM: '+esc(d.stats.usedMemory||'n/a')+' · Peak: '+esc(d.stats.peakMemory||'n/a')+'</div><div class="m">Audit: '+d.auditCount+' · Snapshots: '+d.snapshotCount+' · Snapshot cuối: '+(d.lastSnapshot?ago(d.lastSnapshot.at):'chưa có')+'</div>'}).catch(function(e){$('dbs').innerHTML=errBox(e.message)});
+ api('GET','/api/admin/db/audit?limit=30').then(function(d){$('dbaudit').innerHTML=d.list.length?d.list.map(function(x){return '<div class="li"><div class="top"><b>'+esc(x.action)+'</b><span class="m">'+ago(x.at)+'</span></div><div class="m">'+esc(JSON.stringify(x.detail||{}))+'</div></div>'}).join(''):'Chưa có thao tác' }).catch(function(e){$('dbaudit').innerHTML=errBox(e.message)});
+ api('GET','/api/admin/db/snapshots?limit=10').then(function(d){$('dbsnapshots').innerHTML=d.list.length?d.list.map(function(x){return '<div class="li"><b>'+new Date(x.at).toLocaleString()+'</b><div class="m">Render: '+(x.snapshot.render.ok?'OK':'Lỗi')+' · Railway: '+(x.snapshot.railway.ok?'OK':'Lỗi')+' · GitHub: '+(x.snapshot.github.ok?'OK':'Lỗi')+'</div></div>'}).join(''):'Chưa có snapshot'}).catch(function(e){$('dbsnapshots').innerHTML=errBox(e.message)});
+ api('GET','/api/admin/db/settings').then(function(d){var s=d.settings||{};$('dbrefreshsec').value=s.refreshSeconds||0;$('dbdefault').value=s.defaultTab||'deploy'}).catch(function(){});
+}
 /* ---- Thông báo Discord ---- */
-function vNotify(){
- M('<div class="card"><h3>📣 Gửi thông báo lên Discord</h3><p class="hint">Chọn kênh stock cloud phone hoặc thông báo. Bot chính sẽ gửi trực tiếp vào kênh đã chọn.</p>'
- +'<select id="ndest" style="margin-bottom:8px"><option value="">Đang tải kênh...</option></select>'
- +'<div class="row" style="margin-bottom:8px"><input id="nname" placeholder="Tên địa chỉ mới (VD: Stock Cloud Phone)"><input id="nid" inputmode="numeric" placeholder="ID kênh Discord"></div>'
- +'<button class="btn sm" data-a="nsave">＋ Thêm địa chỉ/kênh</button><div id="nchannels" class="hint"></div></div>'
- +'<div class="card"><h3>Thông báo nhanh</h3><p class="hint">Bấm một nút để gửi mẫu thông báo vào kênh đang chọn.</p><div class="grid">'
- +'<button class="btn" data-a="nquick" data-kind="stock_vs">📦 Stock VSPhone</button>'
- +'<button class="btn" data-a="nquick" data-kind="stock_vmos">☁️ Stock VMOS</button>'
- +'<button class="btn bad" data-a="nquick" data-kind="empty_vs">⚠️ Đang hết máy VSPhone</button>'
- +'<button class="btn bad" data-a="nquick" data-kind="empty_vmos">⚠️ Đang hết máy VMOS</button></div></div>'
- +'<div class="card"><h3>Soạn thông báo riêng</h3><textarea id="nmsg" style="min-height:130px;white-space:pre-wrap" maxlength="2000" placeholder="Nhập nội dung thông báo..."></textarea>'
- +'<div class="acts"><button class="btn ok" data-a="nsend">Gửi tin nhắn Discord</button></div></div>');
- loadNotifyChannels();
+function vNotify(){M('<div class="card"><h3>Gửi thông báo Discord</h3><p class="hint">Chọn kênh mà bot chính có quyền xem và gửi tin nhắn.</p><select id="nch"><option value="">Đang tải kênh...</option></select><div class="row" style="margin-top:8px"><input id="ndname" placeholder="Tên địa chỉ lưu"><input id="ndid" placeholder="Channel ID Discord"></div><div class="acts"><button class="btn sm" data-a="ndsave">Lưu địa chỉ</button><button class="btn sm ghost" data-a="nrefresh">Tải lại kênh</button></div><textarea id="nmsg" style="min-height:130px;white-space:pre-wrap" placeholder="Nội dung thông báo (tối đa 2000 ký tự)"></textarea><div class="acts"><button class="btn ok" data-a="nsend">Gửi thông báo</button><button class="btn sm" data-a="nquick" data-type="vmos">Stock VMOS</button><button class="btn sm" data-a="nquick" data-type="vsphone">Stock VSPhone</button><button class="btn sm bad" data-a="nquick" data-type="empty-vmos">Hết máy VMOS</button><button class="btn sm bad" data-a="nquick" data-type="empty-vsphone">Hết máy VSPhone</button></div></div><div class="card"><h3>Địa chỉ đã lưu</h3><div id="ndlist" class="m">Đang tải...</div></div><div class="card"><h3>Lịch sử gửi</h3><div id="nhistory" class="m">Đang tải...</div></div>');loadNotify()}
+function loadNotify(){api('GET','/api/admin/notify/channels').then(function(d){var opts=d.channels.map(function(c){return '<option value="'+esc(c.id)+'">'+esc(c.guild)+' · '+esc(c.name)+'</option>'});d.destinations.forEach(function(x){opts.push('<option value="'+esc(x.channelId)+'">★ '+esc(x.name)+'</option>')});$('nch').innerHTML='<option value="">Chọn kênh...</option>'+opts.join('');$('ndlist').innerHTML=d.destinations.length?d.destinations.map(function(x){return '<div class="li"><div class="top"><b>'+esc(x.name)+'</b><button class="btn sm bad" data-a="nddel" data-id="'+esc(x.id)+'">Xóa</button></div><div class="m">'+esc(x.channelId)+'</div></div>'}).join(''):'Chưa lưu địa chỉ'}).catch(function(e){$('nch').innerHTML='<option value="">Không tải được kênh</option>';$('ndlist').innerHTML=errBox(e.message)});api('GET','/api/admin/notify/history').then(function(d){$('nhistory').innerHTML=d.list.length?d.list.map(function(x){return '<div class="li"><div class="m">'+new Date(x.at).toLocaleString()+' · '+esc(x.channelId)+'</div><div style="white-space:pre-wrap;overflow-wrap:anywhere">'+esc(x.message)+'</div></div>'}).join(''):'Chưa gửi thông báo nào'}).catch(function(e){$('nhistory').innerHTML=errBox(e.message)})}
+function infraDetail(provider,id,project,environment){
+ var q=provider==='render'?'provider=render&serviceId='+encodeURIComponent(id):'provider=railway&projectId='+encodeURIComponent(project)+'&environmentId='+encodeURIComponent(environment)+'&serviceId='+encodeURIComponent(id);
+ M('<div class="card" data-service="'+(provider==='render'?esc(id):'')+'"><div class="top"><h3>'+provider.toUpperCase()+' · Lịch sử deploy</h3><button class="btn sm ghost" data-a="backdeploy">Quay lại</button></div><div id="ihistory" class="m">Đang tải...</div></div><div class="card"><h3>Logs gần đây</h3><div id="ilogs" class="m">Đang tải...</div></div>');
+ api('GET','/api/admin/infra/history?'+q).then(function(d){
+  var rows=d.list||[];
+  $('ihistory').innerHTML=rows.length?rows.map(function(x){var can=x.canRollback;return '<div class="li"><div class="top"><b>'+esc(x.status||'?')+'</b><span class="m">'+ago(x.createdAt||x.at)+'</span></div><div class="m">'+esc(x.id)+'</div>'+(provider==='railway'&&can?'<button class="btn sm bad" data-a="railrollback" data-id="'+esc(x.id)+'">Rollback về bản này</button>':'')+(provider==='render'&&x.commitId?'<button class="btn sm bad" data-a="renderrollback" data-commit="'+esc(x.commitId)+'">Deploy lại commit này</button>':'')+'</div>'}).join(''):'Không có lịch sử';
+  var logq=provider==='render'?'provider=render&serviceId='+encodeURIComponent(id)+'&limit=50':(rows.length?'provider=railway&deploymentId='+encodeURIComponent(rows[0].id)+'&limit=50':'');
+  if(!logq){$('ilogs').textContent='Chưa có deployment để lấy log';return;}
+  api('GET','/api/admin/infra/logs?'+logq).then(function(ld){var logs=Array.isArray(ld.logs)?ld.logs:[];$('ilogs').innerHTML=logs.length?logs.map(function(x){return '<div class="li"><div class="m">'+esc(x.timestamp||x.time||'')+' · '+esc(x.level||x.severity||'')+'</div><div style="font:12px ui-monospace;white-space:pre-wrap;overflow-wrap:anywhere">'+esc(x.message||x.text||JSON.stringify(x))+'</div></div>'}).join(''):'Không có log trong khoảng thời gian truy vấn'}).catch(function(e){$('ilogs').innerHTML=errBox(e.message)});
+ }).catch(function(e){$('ihistory').innerHTML=errBox(e.message);$('ilogs').textContent='Không tải được lịch sử deployment'});
 }
-function loadNotifyChannels(){
- api('GET','/api/admin/notify/channels').then(function(d){
-  var list=(d.saved||[]).map(function(x){return {id:x.id,label:(x.name||'Địa chỉ')+' · #'+(x.channel||'')+' · '+(x.guild||'')}})
-    .concat((d.channels||[]).map(function(x){return {id:x.id,label:x.label}}));
-  var seen={};list=list.filter(function(x){if(seen[x.id])return false;seen[x.id]=1;return true});
-  $('ndest').innerHTML='<option value="">-- Chọn kênh Discord --</option>'+list.map(function(x){return '<option value="'+esc(x.id)+'">'+esc(x.label)+'</option>'}).join('');
-  $('nchannels').textContent='Đã tìm thấy '+(d.channels||[]).length+' kênh văn bản · Địa chỉ đã lưu: '+(d.saved||[]).length;
- }).catch(function(e){$('ndest').innerHTML='<option value="">Không tải được kênh</option>';$('nchannels').innerHTML=errBox(e.message)});
-}
-var NOTIFY_TEMPLATES={
- stock_vs:'🟠 **STOCK VSPhone**\\nMáy VSPhone hiện đang có hàng. Vào kênh cloud phone để nhận thông tin và đăng ký nhé!',
- stock_vmos:'☁️ **STOCK VMOS**\\nMáy VMOS Cloud hiện đang có hàng. Vào kênh cloud phone để nhận thông tin và đăng ký nhé!',
- empty_vs:'⚠️ **THÔNG BÁO HẾT MÁY VSPhone**\\nHiện tại VSPhone đã hết máy. Khi có hàng trở lại, admin sẽ thông báo tại đây. Mong mọi người thông cảm!',
- empty_vmos:'⚠️ **THÔNG BÁO HẾT MÁY VMOS**\\nHiện tại VMOS Cloud đã hết máy. Khi có hàng trở lại, admin sẽ thông báo tại đây. Mong mọi người thông cảm!'
-};
-function sendNotify(message,btn){
- var channelId=$('ndest').value;if(!channelId)return toast('Hãy chọn kênh nhận thông báo',true);
- if(!message.trim())return toast('Nội dung thông báo đang trống',true);
- if(!confirm('Gửi thông báo vào kênh Discord đã chọn?'))return;
- busy(btn,api('POST','/api/admin/notify/send',{channelId:channelId,message:message})).then(function(r){toast('Đã gửi vào '+r.channel)}).catch(function(e){toast(e.message,true)});
-}
+
+/* ---- Sửa code ---- */
+function vCode(){FILE=null;M('<div class="card"><h3>Quản lý file GitHub</h3><p class="hint">Mở file để sửa hoặc tạo file mới. Commit được gửi trực tiếp lên repository.</p><div class="row"><select id="cf"><option>Đang tải...</option></select><button class="btn" data-a="cload">Mở</button></div><div class="acts"><button class="btn sm" data-a="cnew">+ Tạo file mới</button></div></div><div id="ced"></div>');
+ api('GET','/api/admin/gh/tree').then(function(d){$('cf').innerHTML=d.files.map(function(f){return '<option value="'+esc(f.path)+'">'+esc(f.path)+' ('+Math.ceil(f.size/1024)+' KB)</option>'}).join('')||'<option value="">Trống</option>'}).catch(function(e){$('cf').innerHTML='<option value="">Lỗi</option>';$('ced').innerHTML=errBox(e.message)})}
+function showEditor(){$('ced').innerHTML='<div class="card"><h3>'+esc(FILE.path)+'</h3><textarea id="ct" spellcheck="false" autocapitalize="off" autocomplete="off"></textarea><input id="cm" placeholder="Nội dung commit (tuỳ chọn)" style="margin:10px 0"><div class="acts"><button class="btn ok" data-a="csave">Commit lên GitHub</button>'+(FILE.sha?'<button class="btn bad" data-a="cdelete">Xóa file</button>':'')+'<button class="btn ghost" data-a="cload">Tải lại</button></div></div>';$('ct').value=FILE.content}
 
 /* ---- Biến môi trường ---- */
 function vEnv(){M('<div class="m">Đang tải danh sách service...</div>');(OV?Promise.resolve(OV):api('GET','/api/admin/overview').then(function(d){OV=d;return d})).then(function(d){
@@ -913,10 +1047,9 @@ document.addEventListener('click',function(ev){
  else if(a==='rwdeploy'){if(!confirm('Redeploy '+b.dataset.n+'?'))return;busy(b,api('POST','/api/admin/railway/redeploy',{serviceId:b.dataset.id,environmentId:b.dataset.e})).then(done('Đã gửi redeploy Railway',function(){setTimeout(vDeploy,2500)})).catch(bad)}
  else if(a==='rerun'){busy(b,api('POST','/api/admin/github/rerun/'+b.dataset.id)).then(done('Đã chạy lại workflow')).catch(bad)}
  else if(a==='cload'){var path=$('cf')&&$('cf').value;if(!path)return;busy(b,api('GET','/api/admin/gh/file?path='+encodeURIComponent(path))).then(function(r){FILE=r;showEditor()}).catch(bad)}
- else if(a==='csave'){if(!FILE)return;if(!confirm('Commit '+FILE.path+' lên GitHub? Render sẽ tự deploy.'))return;busy(b,api('PUT','/api/admin/gh/file',{path:FILE.path,content:$('ct').value,sha:FILE.sha,message:$('cm').value})).then(function(r){FILE.sha=r.sha;FILE.content=$('ct').value;toast('Đã commit '+r.commit+', Render đang deploy')}).catch(bad)}
- else if(a==='nsave'){var nn=$('nname').value.trim(),ni=$('nid').value.trim();if(!nn||!ni)return toast('Nhập tên và ID kênh',true);busy(b,api('POST','/api/admin/notify/destinations',{name:nn,channelId:ni})).then(function(){toast('Đã thêm địa chỉ Discord');$('nname').value='';$('nid').value='';loadNotifyChannels()}).catch(bad)}
- else if(a==='nquick'){sendNotify(NOTIFY_TEMPLATES[b.dataset.kind]||'',b)}
- else if(a==='nsend'){sendNotify($('nmsg').value,b)}
+ else if(a==='cnew'){var path=prompt('Đường dẫn file mới, ví dụ src/new.js');if(!path)return;if(!/^[\w.\-\/]{1,120}$/.test(path)||path.indexOf('..')>=0||/(^|\/)\.env/i.test(path)||path[0]==='/')return toast('Đường dẫn không hợp lệ',true);FILE={path:path,sha:null,content:''};showEditor()}
+ else if(a==='csave'){if(!FILE)return;if(!confirm((FILE.sha?'Commit sửa ':'Tạo file ')+FILE.path+' lên GitHub?'))return;busy(b,api('PUT','/api/admin/gh/file',{path:FILE.path,content:$('ct').value,sha:FILE.sha,message:$('cm').value})).then(function(r){FILE.sha=r.sha;FILE.content=$('ct').value;toast('Đã commit '+r.commit);}).catch(bad)}
+ else if(a==='cdelete'){if(!FILE||!FILE.sha||!confirm('Xóa vĩnh viễn '+FILE.path+' khỏi GitHub?'))return;busy(b,api('DELETE','/api/admin/gh/file',{path:FILE.path,sha:FILE.sha,message:$('cm').value})).then(done('Đã xóa file khỏi GitHub',function(){FILE=null;$('ced').innerHTML='';vCode()})).catch(bad)}
  else if(a==='eload'){loadEnv()}
  else if(a==='eshow'){var i=b.closest('.evar').querySelector('.ev');i.type=i.type==='password'?'text':'password';b.textContent=i.type==='password'?'Hiện':'Ẩn'}
  else if(a==='esave'){var r2=b.closest('.evar');busy(b,envSend('PUT',r2.dataset.k,r2.querySelector('.ev').value)).then(done('Đã lưu '+r2.dataset.k)).catch(bad)}
@@ -926,6 +1059,20 @@ document.addEventListener('click',function(ev){
  else if(a==='bdel'){if(!confirm('Xóa bot này?'))return;busy(b,api('DELETE','/api/admin/bots/'+b.dataset.id)).then(done('Đã xóa bot',loadBots)).catch(bad)}
  else if(a==='badd'){var tk=$('bt').value.trim();if(!tk)return toast('Dán token bot trước',true);busy(b,api('POST','/api/admin/bots',{token:tk})).then(done('Đã thêm bot và đang chạy',function(){$('bt').value='';loadBots()})).catch(bad)}
  else if(a==='gen'){busy(b,api('POST','/api/admin/gen',{count:$('gn').value,coins:$('gx').value})).then(function(r){var o=$('go');o.style.display='block';o.value=r.codes.join('\n');toast('Đã tạo '+r.codes.length+' code')}).catch(bad)}
+ else if(a==='dbrefresh'){loadDatabase()}
+ else if(a==='dbsnapshot'){busy(b,api('POST','/api/admin/db/snapshot',{})).then(done('Đã lưu snapshot Redis',loadDatabase)).catch(bad)}
+ else if(a==='dbsettings'){var sec=Math.floor(Number($('dbrefreshsec').value));busy(b,api('PUT','/api/admin/db/settings',{settings:{refreshSeconds:sec,defaultTab:$('dbdefault').value}})).then(function(){DASH_REFRESH=sec;startDashRefresh();toast('Đã lưu cài đặt')}).catch(bad)}
+ else if(a==='nrefresh'){loadNotify()}
+ else if(a==='ndsave'){busy(b,api('POST','/api/admin/notify/destinations',{name:$('ndname').value,channelId:$('ndid').value})).then(done('Đã lưu địa chỉ',loadNotify)).catch(bad)}
+ else if(a==='nddel'){if(!confirm('Xóa địa chỉ này?'))return;busy(b,api('DELETE','/api/admin/notify/destinations/'+b.dataset.id)).then(done('Đã xóa',loadNotify)).catch(bad)}
+ else if(a==='nsend'){busy(b,api('POST','/api/admin/notify/send',{channelId:$('nch').value,message:$('nmsg').value})).then(done('Đã gửi Discord')).catch(bad)}
+ else if(a==='nquick'){var m={vmos:'📱 STOCK VMOS CLOUD\n\nHiện đã có máy VMOS. Ai cần nhận máy hãy vào mục Cloud Phone.',vsphone:'📱 STOCK VSPHONE\n\nHiện đã có máy VSPhone. Ai cần nhận máy hãy vào mục Cloud Phone.','empty-vmos':'⚠️ VMOS CLOUD\n\nHiện tại đã hết máy VMOS. Khi có máy mới sẽ thông báo sau.','empty-vsphone':'⚠️ VSPHONE\n\nHiện tại đã hết máy VSPhone. Khi có máy mới sẽ thông báo sau.'};$('nmsg').value=m[b.dataset.type]||''}
+ else if(a==='infraDetail'){infraDetail(b.dataset.provider,b.dataset.id,b.dataset.p,b.dataset.e)}
+ else if(a==='backdeploy'){vDeploy()}
+ else if(a==='rrestart'){if(!confirm('Restart service Render này?'))return;busy(b,api('POST','/api/admin/render/'+b.dataset.id+'/restart',{})).then(done('Đã gửi restart',function(){setTimeout(vDeploy,2500)})).catch(bad)}
+ else if(a==='renderrollback'){if(!confirm('Deploy lại commit '+b.dataset.commit+'?'))return;var svc=b.closest('.card')&&b.closest('.card').dataset.service;if(!svc){toast('Thiếu service ID, hãy mở lại lịch sử từ thẻ service',true);return}busy(b,api('POST','/api/admin/render/'+svc+'/rollback',{commitId:b.dataset.commit})).then(done('Đã gửi deploy commit cũ',function(){setTimeout(vDeploy,3000)})).catch(bad)}
+ else if(a==='railrollback'){if(!confirm('Rollback Railway về deployment này?'))return;busy(b,api('POST','/api/admin/railway/rollback',{deploymentId:b.dataset.id})).then(done('Đã gửi rollback',function(){setTimeout(vDeploy,3000)})).catch(bad)}
+ else if(a==='railredeploy'){busy(b,api('POST','/api/admin/railway/redeploy',{serviceId:'',environmentId:''})).catch(bad)}
 });
 $('pw').addEventListener('keydown',function(e){if(e.key==='Enter')pwLogin()});
 boot();
