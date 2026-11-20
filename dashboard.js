@@ -979,7 +979,7 @@ body{background:transparent;color:var(--tx);text-shadow:0 1px 8px rgba(8,16,48,.
 body::before{
   background:
     linear-gradient(180deg,rgba(6,12,34,.30),rgba(6,12,34,.52)),
-    url(/dash-bg.jpg) center top/cover no-repeat,
+    url(data:image/jpeg;base64,${BG_IMG.toString('base64')}) center top/cover no-repeat,
     linear-gradient(140deg,#1b2a5c,#4d6fb8 45%,#0b1226);
   transform:none;animation:none;z-index:-2;
 }
@@ -1077,13 +1077,13 @@ select option{background:#1d2a52;color:#fff}
 }
 /* ===== TRONG VEO: không làm mờ, nhìn xuyên thẳng qua kính ===== */
 :root{
-  --glass:rgba(10,20,52,.16);--mut:rgba(255,255,255,.88);
+  --glass:rgba(10,20,52,.16);--mut:rgba(255,255,255,.92);
   --sheen:linear-gradient(135deg,rgba(255,255,255,.20),rgba(255,255,255,.02) 34%,rgba(255,255,255,0) 62%,rgba(255,255,255,.10));
   --blur:saturate(1.35) brightness(1.06);--blur-lg:saturate(1.45) brightness(1.08);
 }
 body::before{background:
-  linear-gradient(180deg,rgba(6,12,34,0),rgba(6,12,34,.16)),
-  url(/dash-bg.jpg) center top/cover no-repeat,
+  linear-gradient(180deg,rgba(6,12,34,.10),rgba(6,12,34,.30)),
+  url(data:image/jpeg;base64,${BG_IMG.toString('base64')}) center top/cover no-repeat,
   linear-gradient(140deg,#1b2a5c,#4d6fb8 45%,#0b1226)}
 .card,#login .glass-box,.hdr,.sidebar,.toast,.btn,.chip,.ghost,.ham,input,select,textarea,.kv,.err,.overlay{
   -webkit-backdrop-filter:saturate(1.3) brightness(1.05);backdrop-filter:saturate(1.3) brightness(1.05)}
@@ -1092,7 +1092,7 @@ body::before{background:
 .hdr{background:linear-gradient(180deg,rgba(255,255,255,.14),rgba(255,255,255,.02))}
 .sidebar{background:linear-gradient(160deg,rgba(255,255,255,.14),rgba(255,255,255,.03))}
 .btn{background:linear-gradient(135deg,rgba(255,255,255,.30),rgba(170,205,255,.08) 55%,rgba(255,255,255,.14))}
-input,select,textarea{background:rgba(10,20,52,.18)}
+input,select,textarea{background:rgba(6,12,36,.40)}
 input::placeholder,textarea::placeholder{color:rgba(255,255,255,.78)}
 input:focus,select:focus,textarea:focus{background:rgba(255,255,255,.13)}
 .kv{background:rgba(8,16,48,.22)}
@@ -1106,7 +1106,7 @@ input,select,textarea{text-shadow:0 1px 2px rgba(0,8,36,.6)}
 </style>
 <style id="liquid">
 /* ===== LIQUID GLASS (kiểu iOS 26): rìa kính bẻ cong ánh sáng, viền sáng, nút viên thuốc ===== */
-:root{--glass:rgba(255,255,255,0);--sheen:linear-gradient(135deg,rgba(255,255,255,.10),rgba(255,255,255,0) 36%,rgba(255,255,255,0) 66%,rgba(255,255,255,.08))}
+:root{--glass:rgba(8,14,40,.38);--sheen:linear-gradient(135deg,rgba(255,255,255,.10),rgba(255,255,255,0) 36%,rgba(255,255,255,0) 66%,rgba(255,255,255,.08))}
 .card,#login .glass-box,.hdr,.sidebar,.toast{
   -webkit-backdrop-filter:saturate(1.5) brightness(1.08);backdrop-filter:saturate(1.5) brightness(1.08);
   background:var(--sheen),var(--glass);border:0;
