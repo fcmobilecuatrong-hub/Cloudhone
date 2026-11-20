@@ -497,6 +497,60 @@ return tostring(amount)`;
         res.json({ ok: true, sha: r.content.sha, commit: r.commit.sha.slice(0, 7) });
     }));
 
+
+    // ---------- Admin: thông báo Discord ----------
+    const NOTIFY_DEST_KEY = 'dashboard_notify_destinations';
+    async function mainDiscordClient() {
+        const c = ctx.running && ctx.running.get('main');
+        if (!c || !c.isReady()) throw fail('Bot chính chưa online, không thể gửi Discord.', 503);
+        return c;
+    }
+    app.get('/api/admin/notify/channels', adminOnly, wrap(async (req, res) => {
+        const c = await mainDiscordClient();
+        const rows = [];
+        for (const guild of c.guilds.cache.values()) {
+            let channels = guild.channels.cache;
+            try { channels = await guild.channels.fetch(); } catch {}
+            for (const ch of channels.values()) {
+                if (ch && ch.type === 0) rows.push({
+                    id: ch.id, name: ch.name, guild: guild.name,
+                    label: `${guild.name} / #${ch.name}`
+                });
+            }
+        }
+        const savedRaw = await redis.hgetall(NOTIFY_DEST_KEY);
+        const saved = Object.entries(savedRaw || {}).map(([id, raw]) => {
+            try { return { id, ...JSON.parse(raw) }; } catch { return null; }
+        }).filter(Boolean);
+        res.json({ channels: rows, saved });
+    }));
+    app.post('/api/admin/notify/destinations', adminOnly, wrap(async (req, res) => {
+        const name = String(req.body && req.body.name || '').trim().slice(0, 50);
+        const channelId = String(req.body && req.body.channelId || '').trim();
+        if (!name || !/^\d{15,22}$/.test(channelId)) throw fail('Nhập tên và ID kênh Discord hợp lệ.');
+        const c = await mainDiscordClient();
+        const ch = await c.channels.fetch(channelId);
+        if (!ch || ch.type !== 0 || !ch.guild) throw fail('ID này không phải kênh văn bản mà bot truy cập được.');
+        await redis.hset(NOTIFY_DEST_KEY, channelId, JSON.stringify({ name, guild: ch.guild.name, channel: ch.name }));
+        res.json({ ok: true, destination: { id: channelId, name, guild: ch.guild.name, channel: ch.name } });
+    }));
+    app.delete('/api/admin/notify/destinations/:id', adminOnly, wrap(async (req, res) => {
+        if (!/^\d{15,22}$/.test(req.params.id)) throw fail('ID kênh không hợp lệ.');
+        await redis.hdel(NOTIFY_DEST_KEY, req.params.id);
+        res.json({ ok: true });
+    }));
+    app.post('/api/admin/notify/send', adminOnly, wrap(async (req, res) => {
+        const channelId = String(req.body && req.body.channelId || '').trim();
+        const message = String(req.body && req.body.message || '').trim();
+        if (!/^\d{15,22}$/.test(channelId)) throw fail('Chọn kênh nhận thông báo.');
+        if (!message || message.length > 2000) throw fail('Nội dung phải từ 1 đến 2000 ký tự.');
+        const c = await mainDiscordClient();
+        const ch = await c.channels.fetch(channelId);
+        if (!ch || ch.type !== 0 || typeof ch.send !== 'function') throw fail('Không tìm thấy kênh văn bản hoặc bot không có quyền gửi.');
+        const sent = await ch.send({ content: message, allowedMentions: { parse: [] } });
+        res.json({ ok: true, messageId: sent.id, channel: `#${ch.name}` });
+    }));
+
     // ---------- Admin: biến môi trường ----------
     const envKey = k => typeof k === 'string' && /^[A-Za-z_][A-Za-z0-9_]{0,99}$/.test(k);
     app.get('/api/admin/env/render/:id', adminOnly, wrap(async (req, res) => {
@@ -724,18 +778,18 @@ function closeSide(){$('sidebar').classList.remove('open');$('overlay').classLis
 function boot(){api('GET','/api/me').then(function(m){ME=m;$('login').style.display='none';$('app').style.display='block';head();buildNav();go(TAB&&tabList().some(function(t){return t[0]===TAB})?TAB:tabList()[0][0])}).catch(function(e){if(K){K='';sessionStorage.removeItem('k')}showLogin(e.status===401?'':e.message)})}
 function head(){var u=ME.user;var av=u&&u.avatar?u.avatar:'data:image/gif;base64,R0lGODlhAQABAAAAACw=';$('av').src=av;$('sav').src=av;$('snm').textContent=u?u.name:'Admin';$('hc').textContent=u?num(ME.coins)+' xu':'';$('shc').textContent=u?num(ME.coins)+' xu':'Admin'}
 function refreshMe(){return api('GET','/api/me').then(function(m){ME=m;head();var b=$('bal');if(b)b.textContent=num(ME.coins)})}
-function tabList(){var t=[];if(ME.user){t.push(['wallet','💰','Ví xu'],['cloud','📱','Cloud Phone'],['top','🏆','Bảng xếp hạng'])}if(ME.admin){t.push(['deploy','🚀','Deploy'],['code','💻','Sửa code'],['env','🔑','Biến MT'],['bots','🤖','Bot'],['gen','🎁','Gift Code'])}return t}
+function tabList(){var t=[];if(ME.user){t.push(['wallet','💰','Ví xu'],['cloud','📱','Cloud Phone'],['top','🏆','Bảng xếp hạng'])}if(ME.admin){t.push(['deploy','🚀','Deploy'],['code','💻','Sửa code'],['notify','📣','Thông báo'],['env','🔑','Biến MT'],['bots','🤖','Bot'],['gen','🎁','Gift Code'])}return t}
 function buildNav(){
   var list=tabList();
   var user=list.filter(function(t){return ['wallet','cloud','top'].indexOf(t[0])>=0});
-  var admin=list.filter(function(t){return ['deploy','code','env','bots','gen'].indexOf(t[0])>=0});
+  var admin=list.filter(function(t){return ['deploy','code','notify','env','bots','gen'].indexOf(t[0])>=0});
   var h='';
   if(user.length){h+='<div class="nav-label">Cloud Phone</div>';user.forEach(function(t){h+='<button class="nav-item'+(TAB===t[0]?' on':'')+'" data-tab="'+t[0]+'"><span class="nav-ico">'+t[1]+'</span>'+t[2]+'</button>'})}
   if(admin.length){h+='<div class="nav-sep"></div><div class="nav-label">Quản trị</div>';admin.forEach(function(t){h+='<button class="nav-item'+(TAB===t[0]?' on':'')+'" data-tab="'+t[0]+'"><span class="nav-ico">'+t[1]+'</span>'+t[2]+'</button>'})}
   $('sideNav').innerHTML=h;
   Array.prototype.forEach.call(document.querySelectorAll('.nav-item[data-tab]'),function(b){b.addEventListener('click',function(){go(b.dataset.tab)})});
 }
-function go(t){TAB=t;buildNav();closeSide();M('<div class="m">Đang tải...</div>');({wallet:vWallet,cloud:vCloud,top:vTop,deploy:vDeploy,code:vCode,env:vEnv,bots:vBots,gen:vGen})[t]()}
+function go(t){TAB=t;buildNav();closeSide();M('<div class="m">Đang tải...</div>');({wallet:vWallet,cloud:vCloud,top:vTop,deploy:vDeploy,code:vCode,notify:vNotify,env:vEnv,bots:vBots,gen:vGen})[t]()}
 function M(h){$('main').innerHTML=h}
 function errBox(m){return '<div class="err">'+esc(m)+'</div>'}
 
@@ -785,6 +839,44 @@ function vCode(){FILE=null;M('<div class="card"><h3>Sửa file trên GitHub</h3>
  api('GET','/api/admin/gh/tree').then(function(d){$('cf').innerHTML=d.files.map(function(f){return '<option value="'+esc(f.path)+'">'+esc(f.path)+' ('+Math.ceil(f.size/1024)+' KB)</option>'}).join('')||'<option value="">Trống</option>'}).catch(function(e){$('cf').innerHTML='<option value="">Lỗi</option>';$('ced').innerHTML=errBox(e.message)})}
 function showEditor(){$('ced').innerHTML='<div class="card"><h3>'+esc(FILE.path)+'</h3><textarea id="ct" spellcheck="false" autocapitalize="off" autocomplete="off"></textarea><input id="cm" placeholder="Nội dung commit (tuỳ chọn)" style="margin:10px 0"><div class="acts"><button class="btn ok" data-a="csave">Commit và deploy</button><button class="btn ghost" data-a="cload">Tải lại</button></div></div>';$('ct').value=FILE.content}
 
+
+/* ---- Thông báo Discord ---- */
+function vNotify(){
+ M('<div class="card"><h3>📣 Gửi thông báo lên Discord</h3><p class="hint">Chọn kênh stock cloud phone hoặc thông báo. Bot chính sẽ gửi trực tiếp vào kênh đã chọn.</p>'
+ +'<select id="ndest" style="margin-bottom:8px"><option value="">Đang tải kênh...</option></select>'
+ +'<div class="row" style="margin-bottom:8px"><input id="nname" placeholder="Tên địa chỉ mới (VD: Stock Cloud Phone)"><input id="nid" inputmode="numeric" placeholder="ID kênh Discord"></div>'
+ +'<button class="btn sm" data-a="nsave">＋ Thêm địa chỉ/kênh</button><div id="nchannels" class="hint"></div></div>'
+ +'<div class="card"><h3>Thông báo nhanh</h3><p class="hint">Bấm một nút để gửi mẫu thông báo vào kênh đang chọn.</p><div class="grid">'
+ +'<button class="btn" data-a="nquick" data-kind="stock_vs">📦 Stock VSPhone</button>'
+ +'<button class="btn" data-a="nquick" data-kind="stock_vmos">☁️ Stock VMOS</button>'
+ +'<button class="btn bad" data-a="nquick" data-kind="empty_vs">⚠️ Đang hết máy VSPhone</button>'
+ +'<button class="btn bad" data-a="nquick" data-kind="empty_vmos">⚠️ Đang hết máy VMOS</button></div></div>'
+ +'<div class="card"><h3>Soạn thông báo riêng</h3><textarea id="nmsg" style="min-height:130px;white-space:pre-wrap" maxlength="2000" placeholder="Nhập nội dung thông báo..."></textarea>'
+ +'<div class="acts"><button class="btn ok" data-a="nsend">Gửi tin nhắn Discord</button></div></div>');
+ loadNotifyChannels();
+}
+function loadNotifyChannels(){
+ api('GET','/api/admin/notify/channels').then(function(d){
+  var list=(d.saved||[]).map(function(x){return {id:x.id,label:(x.name||'Địa chỉ')+' · #'+(x.channel||'')+' · '+(x.guild||'')}})
+    .concat((d.channels||[]).map(function(x){return {id:x.id,label:x.label}}));
+  var seen={};list=list.filter(function(x){if(seen[x.id])return false;seen[x.id]=1;return true});
+  $('ndest').innerHTML='<option value="">-- Chọn kênh Discord --</option>'+list.map(function(x){return '<option value="'+esc(x.id)+'">'+esc(x.label)+'</option>'}).join('');
+  $('nchannels').textContent='Đã tìm thấy '+(d.channels||[]).length+' kênh văn bản · Địa chỉ đã lưu: '+(d.saved||[]).length;
+ }).catch(function(e){$('ndest').innerHTML='<option value="">Không tải được kênh</option>';$('nchannels').innerHTML=errBox(e.message)});
+}
+var NOTIFY_TEMPLATES={
+ stock_vs:'🟠 **STOCK VSPhone**\\nMáy VSPhone hiện đang có hàng. Vào kênh cloud phone để nhận thông tin và đăng ký nhé!',
+ stock_vmos:'☁️ **STOCK VMOS**\\nMáy VMOS Cloud hiện đang có hàng. Vào kênh cloud phone để nhận thông tin và đăng ký nhé!',
+ empty_vs:'⚠️ **THÔNG BÁO HẾT MÁY VSPhone**\\nHiện tại VSPhone đã hết máy. Khi có hàng trở lại, admin sẽ thông báo tại đây. Mong mọi người thông cảm!',
+ empty_vmos:'⚠️ **THÔNG BÁO HẾT MÁY VMOS**\\nHiện tại VMOS Cloud đã hết máy. Khi có hàng trở lại, admin sẽ thông báo tại đây. Mong mọi người thông cảm!'
+};
+function sendNotify(message,btn){
+ var channelId=$('ndest').value;if(!channelId)return toast('Hãy chọn kênh nhận thông báo',true);
+ if(!message.trim())return toast('Nội dung thông báo đang trống',true);
+ if(!confirm('Gửi thông báo vào kênh Discord đã chọn?'))return;
+ busy(btn,api('POST','/api/admin/notify/send',{channelId:channelId,message:message})).then(function(r){toast('Đã gửi vào '+r.channel)}).catch(function(e){toast(e.message,true)});
+}
+
 /* ---- Biến môi trường ---- */
 function vEnv(){M('<div class="m">Đang tải danh sách service...</div>');(OV?Promise.resolve(OV):api('GET','/api/admin/overview').then(function(d){OV=d;return d})).then(function(d){
  var o='';if(d.render.ok)d.render.data.forEach(function(s){o+='<option value="r|'+esc(s.id)+'">Render · '+esc(s.name)+'</option>'});
@@ -822,6 +914,9 @@ document.addEventListener('click',function(ev){
  else if(a==='rerun'){busy(b,api('POST','/api/admin/github/rerun/'+b.dataset.id)).then(done('Đã chạy lại workflow')).catch(bad)}
  else if(a==='cload'){var path=$('cf')&&$('cf').value;if(!path)return;busy(b,api('GET','/api/admin/gh/file?path='+encodeURIComponent(path))).then(function(r){FILE=r;showEditor()}).catch(bad)}
  else if(a==='csave'){if(!FILE)return;if(!confirm('Commit '+FILE.path+' lên GitHub? Render sẽ tự deploy.'))return;busy(b,api('PUT','/api/admin/gh/file',{path:FILE.path,content:$('ct').value,sha:FILE.sha,message:$('cm').value})).then(function(r){FILE.sha=r.sha;FILE.content=$('ct').value;toast('Đã commit '+r.commit+', Render đang deploy')}).catch(bad)}
+ else if(a==='nsave'){var nn=$('nname').value.trim(),ni=$('nid').value.trim();if(!nn||!ni)return toast('Nhập tên và ID kênh',true);busy(b,api('POST','/api/admin/notify/destinations',{name:nn,channelId:ni})).then(function(){toast('Đã thêm địa chỉ Discord');$('nname').value='';$('nid').value='';loadNotifyChannels()}).catch(bad)}
+ else if(a==='nquick'){sendNotify(NOTIFY_TEMPLATES[b.dataset.kind]||'',b)}
+ else if(a==='nsend'){sendNotify($('nmsg').value,b)}
  else if(a==='eload'){loadEnv()}
  else if(a==='eshow'){var i=b.closest('.evar').querySelector('.ev');i.type=i.type==='password'?'text':'password';b.textContent=i.type==='password'?'Hiện':'Ẩn'}
  else if(a==='esave'){var r2=b.closest('.evar');busy(b,envSend('PUT',r2.dataset.k,r2.querySelector('.ev').value)).then(done('Đã lưu '+r2.dataset.k)).catch(bad)}
