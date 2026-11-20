@@ -11,8 +11,14 @@ const crypto = require('crypto');
 const vm = require('vm');
 
 module.exports = function mountDashboard(app, panelAuth, ctx = {}) {
-    const redis = ctx.redis;
-    if (!redis) throw new Error('dashboard: thiếu ctx.redis, hãy dùng dòng require mới trong server.js');
+    // Nếu server.js còn dòng require cũ (không truyền ctx) thì tự nối Redis, bot vẫn chạy bình thường
+    let redis = ctx.redis;
+    if (!redis) {
+        console.warn('[dashboard] Chưa truyền ctx, tự kết nối Redis (tab Bot sẽ tắt). Hãy dùng dòng require mới trong server.js.');
+        const Redis = require('ioredis');
+        redis = new Redis(process.env.REDIS_URL || 'redis://127.0.0.1:6379');
+        redis.on('error', err => console.error('[dashboard Redis]', err.message));
+    }
     const env = k => String(process.env[k] || '').trim();
     const fail = (m, s = 400) => Object.assign(new Error(m), { status: s });
     const wrap = fn => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(e => {
