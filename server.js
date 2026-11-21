@@ -149,6 +149,39 @@ function formatWeekRange(weekStart) {
 }
 
 // WEB SERVER
+// ── Auto-redeploy Railway vsphone mỗi 30 phút ──────────────────────
+async function redeployVsphone() {
+    const token = process.env.RAILWAY_API_TOKEN;
+    const serviceId = process.env.VSPHONE_SERVICE_ID;
+    const envId = process.env.VSPHONE_ENV_ID;
+    if (!token || !serviceId) return;
+    const query = `mutation { serviceInstanceRedeploy(serviceId: "${serviceId}"${envId ? `, environmentId: "${envId}"` : ''}) }`;
+    try {
+        const r = await fetch('https://backboard.railway.app/graphql/v2', { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ query }), signal: AbortSignal.timeout(15000) });
+        const d = await r.json();
+        if (d.errors) console.log('[vsphone-redeploy] lỗi:', d.errors[0].message);
+        else console.log('[vsphone-redeploy] ✓ redeploy lúc', new Date().toLocaleTimeString('vi-VN'));
+    } catch (e) { console.log('[vsphone-redeploy] lỗi:', e.message); }
+}
+if (process.env.RAILWAY_API_TOKEN && process.env.VSPHONE_SERVICE_ID) {
+    setInterval(redeployVsphone, 30 * 60 * 1000);
+    console.log('[vsphone-redeploy] auto-redeploy mỗi 30 phút đã bật');
+}
+
+// ── UMO auto-login ──────────────────────────────────────────────────
+app.get('/umo/login', async (req, res) => {
+    const c = req.query.c;
+    if (!c) return res.status(400).send('Thiếu code');
+    const raw = await redis.get(`umo_login_${c}`).catch(() => null);
+    if (!raw) return res.type('html').send(`<!doctype html><html><head><meta charset="utf-8"><title>Hết hạn</title><meta name="viewport" content="width=device-width,initial-scale=1"></head><body style="background:#0a0b18;color:#f87171;font-family:sans-serif;padding:40px;text-align:center"><h2>⏳ Link đã hết hạn</h2><p>Lấy tài khoản mới bằng /reg</p></body></html>`);
+    await redis.del(`umo_login_${c}`);
+    const { token, userId } = JSON.parse(raw);
+    res.type('html').send(`<!doctype html><html><head><meta charset="utf-8"><title>Đang vào UMO...</title><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{background:#0a0b18;color:#e0e7ff;font-family:sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;flex-direction:column;gap:16px}h2{margin:0;font-size:20px}.sp{width:36px;height:36px;border:3px solid rgba(99,102,241,.3);border-top-color:#818cf8;border-radius:50%;animation:spin .8s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}</style></head><body><div class="sp"></div><h2>Đang vào UMO Cloud...</h2><p style="color:rgba(255,255,255,.4);font-size:13px">Tự động đăng nhập</p><script>
+try{var d={'token':${JSON.stringify(token)},'userId':${JSON.stringify(userId)}};localStorage.setItem('token',d.token);localStorage.setItem('userId',d.userId);localStorage.setItem('userInfo',JSON.stringify({token:d.token,userId:d.userId,clientCode:'ae02b'}));localStorage.setItem('loginInfo',JSON.stringify({token:d.token,userId:d.userId}));}catch(e){}
+setTimeout(function(){location.href='https://h5.willclouds.com/h5app/?clientCode=ae02b'},800);
+</script></body></html>`);
+});
+
 app.get('/redeem', async (req, res) => {
     const { sid } = req.query;
     const renderError = (msg) => res.status(403).send(`
@@ -349,6 +382,9 @@ async function onReady(client, token, botId) {
         new SlashCommandBuilder().setName('reg').setDescription('Chọn loại cloud và lấy tài khoản (10 xu)'),
         new SlashCommandBuilder().setName('buycloud').setDescription('Mua cloud phone: nhập email|mật khẩu'),
         new SlashCommandBuilder().setName('daily').setDescription('Điểm danh nhận 20 xu'),
+        new SlashCommandBuilder().setName('ketnoi').setDescription('Liên kết tài khoản Dashboard web với Discord của bạn')
+            .addStringOption(o => o.setName('token').setDescription('Token lấy ở Dashboard > Cài đặt').setRequired(true).setMaxLength(40)),
+        new SlashCommandBuilder().setName('ngatketnoi').setDescription('Hủy mọi liên kết Dashboard web đang gắn với Discord của bạn'),
         new SlashCommandBuilder().setName('youtube').setDescription('Đăng ký kênh YouTube nhận xu mỗi ngày'),
         new SlashCommandBuilder().setName('testwelcome').setDescription('Gửi thử lời chào mừng vào kênh welcome (Admin)'),
         new SlashCommandBuilder().setName('nhiemvu').setDescription('Đăng bảng nhiệm vụ nhận xu vào kênh này (Admin)'),
@@ -437,7 +473,7 @@ function regEmbeds() {
     const embed = new EmbedBuilder()
         .setColor(0x19b9f2)
         .setTitle('📋 Reg Panel')
-        .setDescription('Chọn dịch vụ bên dưới để tạo tài khoản nhanh gọn.\n\n**Dịch vụ cloud**\n• 🌐 VMOS Cloud — Đang hoạt động\n• 🟠 VSPhone — Đang hoạt động\n• 🔵 UMO Cloud — Đang hoạt động\n• 🔴 UGPhone — Sắp có\n\n*Panel chỉ dùng được bởi người đã mở lệnh.*')
+        .setDescription('Chọn dịch vụ bên dưới để tạo tài khoản nhanh gọn.\n\n**Dịch vụ cloud**\n• 🌐 VMOS Cloud — Đang hoạt động\n• 🟠 VSPhone — Đang hoạt động\n• 🔴 UGPhone — Sắp có\n\n*Panel chỉ dùng được bởi người đã mở lệnh.*')
         .setFooter({ text: 'Kasumi Bot • Reg System' });
     return [embed];
 }
@@ -481,8 +517,11 @@ async function handleRegProvider(interaction, providerKey) {
             const response = await fetch(`${umoUrl}/register`, { method: 'POST', headers: { 'x-api-key': umoKey, 'Content-Type': 'application/json' }, signal: AbortSignal.timeout(60000) });
             const data = await response.json();
             if (!response.ok || !data.ok || !data.account) throw new Error(data.error || `UMO API lỗi (HTTP ${response.status}).`);
-            mail = data.account; // email@inboxkitten.com
-            pass = 'OTP qua email'; // UMO dùng OTP, không có password cố định
+            // Lưu token vào Redis để tạo link đăng nhập tự động
+            const loginCode = crypto.randomBytes(8).toString('hex');
+            await redis.set(`umo_login_${loginCode}`, JSON.stringify({ token: data.token, userId: data.userId }), 'EX', 1800);
+            mail = data.account;
+            pass = `${process.env.RENDER_DOMAIN || ''}/umo/login?c=${loginCode}`;
             code = null;
         } else {
             if (!process.env.APIKEY) throw new Error('Chưa cấu hình APIKEY để lấy tài khoản VMOS.');
@@ -491,17 +530,12 @@ async function handleRegProvider(interaction, providerKey) {
             if (!response.ok || !data.content) throw new Error(data.message || `Lỗi lấy dữ liệu VMOS (HTTP ${response.status}).`);
             [mail = 'Không có', pass = 'Không có', code = 'Không có'] = data.content.split('|');
         }
-        if (!mail || mail === 'Không có') throw new Error('API trả về tài khoản không đúng định dạng.');
-        const fields = [
-            { name: '📧 Tài khoản', value: `\`${mail}\`` },
-            { name: '🔑 Mật khẩu', value: `\`${pass}\`` },
-        ];
+        if (!mail || !pass || mail === 'Không có' || pass === 'Không có') throw new Error('API trả về tài khoản không đúng định dạng.');
+        const fields = providerKey === 'umo'
+            ? [{ name: '📧 Email UMO', value: `\`${mail}\`` }, { name: '🔗 Link đăng nhập', value: pass }]
+            : [{ name: '📧 Tài khoản', value: `\`${mail}\`` }, { name: '🔑 Mật khẩu', value: `\`${pass}\`` }];
         if (code) fields.push({ name: '🎁 Mã mời', value: `\`${code}\`` });
-        if (providerKey === 'umo') {
-            fields.push({ name: '📲 Cách đăng nhập UMO', value: `Vào **h5.willclouds.com** → nhập email trên → bấm gửi OTP → vào **inboxkitten.com** → tìm email \`${mail.split('@')[0]}\` → lấy mã OTP → đăng nhập.` });
-        } else {
-            fields.push({ name: '💡 Mẹo', value: 'Bấm **📋 Sao chép**, nhấn giữ tin nhắn hiện ra rồi chọn **Sao chép văn bản**. Dán vào `/buycloud`, hoặc bấm **🛒 Mua ngay**.' });
-        }
+        fields.push({ name: '💡 Mẹo', value: 'Bấm **📋 Sao chép**, nhấn giữ tin nhắn hiện ra rồi chọn **Sao chép văn bản**. Dán vào `/buycloud`, hoặc bấm **🛒 Mua ngay**.' });
         const embed = new EmbedBuilder().setColor(prov.color).setAuthor(providerAuthor(prov)).setTitle('Lấy tài khoản thành công')
             .addFields(...fields)
             .setFooter({ text: `Đã trừ 10 xu, số dư còn lại ${remaining} xu` });
@@ -553,7 +587,7 @@ async function fetchLayma(url) {
 }
 
 // ===== /buycloud: chọn loại cloud rồi nhập email|matkhau =====
-const BUY_TYPES = { vmos: { id: 'VM', provider: 'vmos' }, vsphone: { id: 'VS', provider: 'vsphone' } };
+const BUY_TYPES = { vmos: { id: 'VM', provider: 'vmos' }, vsphone: { id: 'VS', provider: 'vsphone' }, umo: { id: 'UM', provider: 'umo' } };
 function buyMenu(client) {
     return new ActionRowBuilder().addComponents(
         new StringSelectMenuBuilder().setCustomId('buycloud_select').setPlaceholder('Chọn loại cloud').addOptions(
@@ -828,6 +862,35 @@ async function handleInteraction(interaction) {
     if (!interaction.isChatInputCommand()) return;
     if (interaction.commandName === 'buycloud') {
         return interaction.reply({ content: '**Chọn loại cloud bạn muốn mua:**', components: [buyMenu(interaction.client)], flags: MessageFlags.Ephemeral });
+    }
+    if (interaction.commandName === 'ketnoi') {
+        const uid = interaction.user.id;
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+        const tries = await redis.incr(`ketnoi_try_${uid}`);
+        if (tries === 1) await redis.expire(`ketnoi_try_${uid}`, 600);
+        if (tries > 10) return interaction.editReply('⛔ Bạn thử quá nhiều lần. Đợi 10 phút rồi thử lại.');
+        const norm = String(interaction.options.getString('token') || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+        if (!/^NGA[A-Z0-9]{12}$/.test(norm)) return interaction.editReply('❌ Token không đúng định dạng. Token có dạng `NGA-XXXX-XXXX-XXXX`, lấy ở Dashboard > Cài đặt.');
+        const webId = await redis.eval("local v=redis.call('GET',KEYS[1]); if v then redis.call('DEL',KEYS[1]) end return v", 1, `ketnoi_tok_${norm}`);
+        if (!webId || !/^[a-f0-9]{16}$/.test(webId)) return interaction.editReply('❌ Token sai, đã dùng hoặc đã hết hạn. Vào Dashboard > Cài đặt bấm **Tạo token mới**.');
+        await redis.del(`webtok_${webId}`);
+        await redis.set(`webacct_${webId}`, JSON.stringify({
+            discordId: uid,
+            name: interaction.user.globalName || interaction.user.username,
+            avatar: interaction.user.displayAvatarURL({ extension: 'png', size: 64 }),
+            at: Date.now()
+        }));
+        await redis.sadd(`discord_webs_${uid}`, webId);
+        await redis.del(`ketnoi_try_${uid}`);
+        return interaction.editReply('✅ **Liên kết thành công!** Quay lại Dashboard, trang sẽ tự mở Ví xu và Cloud Phone.\nNếu không phải bạn tạo token này, gõ `/ngatketnoi` để hủy.');
+    }
+    if (interaction.commandName === 'ngatketnoi') {
+        const uid = interaction.user.id;
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+        const ids = await redis.smembers(`discord_webs_${uid}`);
+        for (const w of ids) if (/^[a-f0-9]{16}$/.test(w)) await redis.del(`webacct_${w}`);
+        await redis.del(`discord_webs_${uid}`);
+        return interaction.editReply(ids.length ? `✅ Đã hủy ${ids.length} liên kết Dashboard. Muốn dùng lại thì lấy token mới và /ketnoi.` : 'ℹ️ Bạn chưa có liên kết Dashboard nào.');
     }
     const adminIds = await getAdminIds();
     const userId = interaction.user.id;
@@ -1451,7 +1514,9 @@ app.delete('/panel/api/update', panelAuth, deployAuth, async (req, res) => {
 setTimeout(() => redis.set('override_boot', '0').catch(() => {}), 60000);
 
 getPublicIp().then(ip => console.log('[IP] Địa chỉ IP máy chủ gọi ra ngoài:', ip || 'không lấy được'));
+
 require('./dashboard')(app, panelAuth, { redis, getBots, startBot, stopBot, saveBot, tokenOf, botView, running });
+
 (async () => {
     try {
         for (const b of await getBots()) {
