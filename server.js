@@ -168,19 +168,6 @@ if (process.env.RAILWAY_API_TOKEN && process.env.VSPHONE_SERVICE_ID) {
     console.log('[vsphone-redeploy] auto-redeploy mỗi 30 phút đã bật');
 }
 
-// ── UMO auto-login ──────────────────────────────────────────────────
-app.get('/umo/login', async (req, res) => {
-    const c = req.query.c;
-    if (!c) return res.status(400).send('Thiếu code');
-    const raw = await redis.get(`umo_login_${c}`).catch(() => null);
-    if (!raw) return res.type('html').send(`<!doctype html><html><head><meta charset="utf-8"><title>Hết hạn</title><meta name="viewport" content="width=device-width,initial-scale=1"></head><body style="background:#0a0b18;color:#f87171;font-family:sans-serif;padding:40px;text-align:center"><h2>⏳ Link đã hết hạn</h2><p>Lấy tài khoản mới bằng /reg</p></body></html>`);
-    await redis.del(`umo_login_${c}`);
-    const { token, userId } = JSON.parse(raw);
-    res.type('html').send(`<!doctype html><html><head><meta charset="utf-8"><title>Đang vào UMO...</title><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{background:#0a0b18;color:#e0e7ff;font-family:sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;flex-direction:column;gap:16px}h2{margin:0;font-size:20px}.sp{width:36px;height:36px;border:3px solid rgba(99,102,241,.3);border-top-color:#818cf8;border-radius:50%;animation:spin .8s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}</style></head><body><div class="sp"></div><h2>Đang vào UMO Cloud...</h2><p style="color:rgba(255,255,255,.4);font-size:13px">Tự động đăng nhập</p><script>
-try{var d={'token':${JSON.stringify(token)},'userId':${JSON.stringify(userId)}};localStorage.setItem('token',d.token);localStorage.setItem('userId',d.userId);localStorage.setItem('userInfo',JSON.stringify({token:d.token,userId:d.userId,clientCode:'ae02b'}));localStorage.setItem('loginInfo',JSON.stringify({token:d.token,userId:d.userId}));}catch(e){}
-setTimeout(function(){location.href='https://h5.willclouds.com/h5app/?clientCode=ae02b'},800);
-</script></body></html>`);
-});
 
 app.get('/redeem', async (req, res) => {
     const { sid } = req.query;
@@ -438,7 +425,6 @@ function iconUrl(name) {
 const CLOUD_PROVIDERS = {
     vmos:    { name: 'VMOS Cloud', emoji: '☁️', color: 0x2f6bff, icon: process.env.ICON_VMOS    || iconUrl('vmos'),    ready: true },
     vsphone: { name: 'VSPhone',    emoji: '🟠', color: 0xff9f1a, icon: process.env.ICON_VSPHONE || iconUrl('vsphone'), ready: true },
-    umo:     { name: 'UMO Cloud',  emoji: '🔵', color: 0x3b82f6, icon: process.env.ICON_UMO     || iconUrl('umo'),     ready: true },
     ugphone: { name: 'UGPhone',    emoji: '🔴', color: 0xff5a4f, icon: process.env.ICON_UGPHONE || iconUrl('ugphone'), ready: false },
 };
 // Tạo emoji ứng dụng từ logo để hiện ảnh trong ô chọn (mỗi bot có bộ emoji riêng)
@@ -474,6 +460,7 @@ function regEmbeds() {
         .setColor(0x19b9f2)
         .setTitle('📋 Reg Panel')
         .setDescription('Chọn dịch vụ bên dưới để tạo tài khoản nhanh gọn.\n\n**Dịch vụ cloud**\n• 🌐 VMOS Cloud — Đang hoạt động\n• 🟠 VSPhone — Đang hoạt động\n• 🔴 UGPhone — Sắp có\n\n*Panel chỉ dùng được bởi người đã mở lệnh.*')
+
         .setFooter({ text: 'Kasumi Bot • Reg System' });
     return [embed];
 }
@@ -482,7 +469,6 @@ function regMenu(client) {
     return new ActionRowBuilder().addComponents(
         new ButtonBuilder().setCustomId('regprovider:vmos').setLabel('VMOS Cloud').setEmoji(emojiFor('vmos', '🌐')).setStyle(ButtonStyle.Success),
         new ButtonBuilder().setCustomId('regprovider:vsphone').setLabel('VSPhone').setEmoji(emojiFor('vsphone', '🟠')).setStyle(ButtonStyle.Primary),
-        new ButtonBuilder().setCustomId('regprovider:umo').setLabel('UMO Cloud').setEmoji(emojiFor('umo', '🔵')).setStyle(ButtonStyle.Primary),
         new ButtonBuilder().setCustomId('regprovider:ugphone').setLabel('UGPhone • Sắp có').setEmoji(emojiFor('ugphone', '🔴')).setStyle(ButtonStyle.Secondary)
     );
 }
@@ -510,19 +496,6 @@ async function handleRegProvider(interaction, providerKey) {
             if (!response.ok || !data.ok || !data.account) throw new Error(data.error || `VSPhone API lỗi (HTTP ${response.status}).`);
             [mail = 'Không có', pass = 'Không có'] = data.account.split('|');
             code = null;
-        } else if (providerKey === 'umo') {
-            const umoUrl = String(process.env.UMO_API_URL || '').replace(/\/+$/, '');
-            if (!umoUrl) throw new Error('Chưa cấu hình UMO_API_URL trong env.');
-            const umoKey = process.env.UMO_API_KEY || '';
-            const response = await fetch(`${umoUrl}/register`, { method: 'POST', headers: { 'x-api-key': umoKey, 'Content-Type': 'application/json' }, signal: AbortSignal.timeout(60000) });
-            const data = await response.json();
-            if (!response.ok || !data.ok || !data.account) throw new Error(data.error || `UMO API lỗi (HTTP ${response.status}).`);
-            // Lưu token vào Redis để tạo link đăng nhập tự động
-            const loginCode = crypto.randomBytes(8).toString('hex');
-            await redis.set(`umo_login_${loginCode}`, JSON.stringify({ token: data.token, userId: data.userId }), 'EX', 1800);
-            mail = data.account;
-            pass = `${process.env.RENDER_DOMAIN || ''}/umo/login?c=${loginCode}`;
-            code = null;
         } else {
             if (!process.env.APIKEY) throw new Error('Chưa cấu hình APIKEY để lấy tài khoản VMOS.');
             const response = await fetch('https://wxygtmfttyidwnhjdwdw.supabase.co/functions/v1/get-key', { method: 'POST', headers: { 'Content-Type': 'application/json', 'apikey': process.env.APIKEY }, body: JSON.stringify({ clientId: crypto.randomUUID() }), signal: AbortSignal.timeout(15000) });
@@ -531,9 +504,7 @@ async function handleRegProvider(interaction, providerKey) {
             [mail = 'Không có', pass = 'Không có', code = 'Không có'] = data.content.split('|');
         }
         if (!mail || !pass || mail === 'Không có' || pass === 'Không có') throw new Error('API trả về tài khoản không đúng định dạng.');
-        const fields = providerKey === 'umo'
-            ? [{ name: '📧 Email UMO', value: `\`${mail}\`` }, { name: '🔗 Link đăng nhập', value: pass }]
-            : [{ name: '📧 Tài khoản', value: `\`${mail}\`` }, { name: '🔑 Mật khẩu', value: `\`${pass}\`` }];
+        const fields = [{ name: '📧 Tài khoản', value: `\`${mail}\`` }, { name: '🔑 Mật khẩu', value: `\`${pass}\`` }];
         if (code) fields.push({ name: '🎁 Mã mời', value: `\`${code}\`` });
         fields.push({ name: '💡 Mẹo', value: 'Bấm **📋 Sao chép**, nhấn giữ tin nhắn hiện ra rồi chọn **Sao chép văn bản**. Dán vào `/buycloud`, hoặc bấm **🛒 Mua ngay**.' });
         const embed = new EmbedBuilder().setColor(prov.color).setAuthor(providerAuthor(prov)).setTitle('Lấy tài khoản thành công')
@@ -587,7 +558,7 @@ async function fetchLayma(url) {
 }
 
 // ===== /buycloud: chọn loại cloud rồi nhập email|matkhau =====
-const BUY_TYPES = { vmos: { id: 'VM', provider: 'vmos' }, vsphone: { id: 'VS', provider: 'vsphone' }, umo: { id: 'UM', provider: 'umo' } };
+const BUY_TYPES = { vmos: { id: 'VM', provider: 'vmos' }, vsphone: { id: 'VS', provider: 'vsphone' } };
 function buyMenu(client) {
     return new ActionRowBuilder().addComponents(
         new StringSelectMenuBuilder().setCustomId('buycloud_select').setPlaceholder('Chọn loại cloud').addOptions(
