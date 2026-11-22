@@ -1276,12 +1276,12 @@ function boot(){api('GET','/api/me').then(function(m){ME=m;$('login').style.disp
 function startDashRefresh(){if(window._dashRefreshTimer)clearInterval(window._dashRefreshTimer);if(DASH_REFRESH>0)window._dashRefreshTimer=setInterval(function(){if(TAB==='deploy')vDeploy();else if(TAB==='db')loadDatabase();else if(TAB==='notify')loadNotify()},DASH_REFRESH*1000)}
 function head(){var u=ME.user;var av=u&&u.avatar?u.avatar:'data:image/gif;base64,R0lGODlhAQABAAAAACw=';$('av').src=av;$('sav').src=av;$('snm').textContent=u?u.name:'Admin';$('hc').textContent=u&&ME.linked?num(ME.coins)+' xu':'';$('shc').textContent=u?(ME.linked?num(ME.coins)+' xu':'Chưa liên kết'):'Admin'}
 function refreshMe(){return api('GET','/api/me').then(function(m){ME=m;head();var b=$('bal');if(b)b.textContent=num(ME.coins)})}
-function tabList(){var t=[];if(ME.user){if(ME.linked)t.push(['wallet','💰','Ví xu'],['cloud','📱','Cloud Phone'],['top','🏆','Bảng xếp hạng']);t.push(['settings','⚙️','Cài đặt'],['guide','📖','Hướng dẫn'])}if(ME.admin){t.push(['deploy','🚀','Deploy'],['code','💻','GitHub'],['env','🔑','Biến MT'],['bots','🤖','Bot'],['gen','🎁','Gift Code'],['notify','📣','Thông báo'],['db','🗄️','Database'])}return t}
+function tabList(){var t=[];if(ME.user){if(ME.linked)t.push(['wallet','💰','Ví xu'],['cloud','📱','Cloud Phone'],['top','🏆','Bảng xếp hạng'],['market','🛍️','Marketplace']);t.push(['settings','⚙️','Cài đặt'],['guide','📖','Hướng dẫn'])}if(ME.admin){t.push(['marketadmin','🛠️','Quản lý Marketplace'],['deploy','🚀','Deploy'],['code','💻','GitHub'],['env','🔑','Biến MT'],['bots','🤖','Bot'],['gen','🎁','Gift Code'],['notify','📣','Thông báo'],['db','🗄️','Database'])}return t}
 function buildNav(){
   var list=tabList();
-  var user=list.filter(function(t){return ['wallet','cloud','top'].indexOf(t[0])>=0});
+  var user=list.filter(function(t){return ['wallet','cloud','top','market'].indexOf(t[0])>=0});
   var acct=list.filter(function(t){return ['settings','guide'].indexOf(t[0])>=0});
-  var admin=list.filter(function(t){return ['deploy','code','env','bots','gen','notify','db'].indexOf(t[0])>=0});
+  var admin=list.filter(function(t){return ['marketadmin','deploy','code','env','bots','gen','notify','db'].indexOf(t[0])>=0});
   var h='';
   if(user.length){h+='<div class="nav-label">Cloud Phone</div>';user.forEach(function(t){h+='<button class="nav-item'+(TAB===t[0]?' on':'')+'" data-tab="'+t[0]+'"><span class="nav-ico">'+t[1]+'</span>'+t[2]+'</button>'})}
   if(acct.length){h+=(user.length?'<div class="nav-sep"></div>':'')+'<div class="nav-label">Tài khoản</div>';acct.forEach(function(t){h+='<button class="nav-item'+(TAB===t[0]?' on':'')+'" data-tab="'+t[0]+'"><span class="nav-ico">'+t[1]+'</span>'+t[2]+'</button>'})}
@@ -1289,7 +1289,49 @@ function buildNav(){
   $('sideNav').innerHTML=h;
   Array.prototype.forEach.call(document.querySelectorAll('.nav-item[data-tab]'),function(b){b.addEventListener('click',function(){go(b.dataset.tab)})});
 }
-function go(t){clearInterval(window._lkTimer);TAB=t;buildNav();closeSide();M('<div class="m">Đang tải...</div>');({settings:vSettings,guide:vGuide,wallet:vWallet,cloud:vCloud,top:vTop,deploy:vDeploy,code:vCode,env:vEnv,bots:vBots,gen:vGen,notify:vNotify,db:vDatabase})[t]()}
+function go(t){clearInterval(window._lkTimer);TAB=t;buildNav();closeSide();M('<div class="m">Đang tải...</div>');({settings:vSettings,guide:vGuide,wallet:vWallet,cloud:vCloud,top:vTop,market:vMarket,marketadmin:vMarketAdmin,deploy:vDeploy,code:vCode,env:vEnv,bots:vBots,gen:vGen,notify:vNotify,db:vDatabase})[t]()}
+
+
+function ngExchange(){var amount=Number($('ngExchangeAmount').value||0);api('POST','/api/nigaria/exchange',{amount:amount}).then(function(){toast('Đổi ACOIN thành công');ngLoadMarket()}).catch(function(e){toast(e.message,true)})}
+function ngComplaint(id){var reason=prompt('Mô tả khiếu nại (ít nhất 5 ký tự):');if(!reason)return;api('POST','/api/nigaria/market/orders/'+id+'/complaint',{reason:reason}).then(function(){toast('Đã gửi khiếu nại');ngLoadMarket()}).catch(function(e){toast(e.message,true)})}
+function vMarketAdmin(){
+ M('<div class="card"><h2>🛠️ Quản lý Marketplace</h2><p class="hint">Duyệt seller, xử lý khiếu nại và sao lưu dữ liệu Marketplace lên GitHub Gist riêng tư.</p><button class="btn sm" onclick="vMarketAdmin()">Làm mới</button> <button class="btn sm" onclick="ngBackupGist()">Backup Gist</button></div><div class="card"><h3>Yêu cầu Seller</h3><div id="ngAdminSellers">Đang tải...</div></div><div class="card"><h3>Khiếu nại</h3><div id="ngAdminComplaints">Đang tải...</div></div><div class="card"><h3>Link Providers</h3><div id="ngAdminProviders">Đang tải...</div></div>');
+ Promise.all([api('GET','/api/nigaria/admin/sellers'),api('GET','/api/nigaria/admin/complaints'),api('GET','/api/nigaria/providers')]).then(function(a){
+  var ss=a[0].sellers||[],cc=a[1].complaints||[],pp=a[2].providers||[];
+  $('ngAdminSellers').innerHTML=ss.length?ss.map(function(x){return '<div class="row" style="justify-content:space-between;padding:9px 0;border-bottom:1px solid var(--edge)"><span>'+esc(x.userId)+' • '+esc(x.status)+'</span>'+(x.status==='pending'?'<button class="btn sm" onclick="ngApproveSeller(\\''+esc(x.userId)+'\\')">Duyệt</button>':'')+'</div>'}).join(''):'<p class="hint">Không có yêu cầu.</p>';
+  $('ngAdminComplaints').innerHTML=cc.length?cc.map(function(x){return '<div style="padding:10px 0;border-bottom:1px solid var(--edge)"><b>'+esc(x.orderId)+'</b><p class="hint">'+esc(x.reason)+'</p><button class="btn sm" onclick="ngResolveComplaint(\\''+x.id+'\\',\\'refund\\')">Hoàn coin</button> <button class="btn sm" onclick="ngResolveComplaint(\\''+x.id+'\\',\\'release\\')">Trả seller</button></div>'}).join(''):'<p class="hint">Không có khiếu nại.</p>';
+  $('ngAdminProviders').innerHTML=pp.map(function(x){return '<div class="row" style="justify-content:space-between;padding:7px 0"><span>'+esc(x.name)+'</span><span class="chip '+(x.ready?'ok':'warn')+'">'+(x.ready?'Đã cấu hình':'Thiếu API key')+'</span></div>'}).join('');
+ }).catch(function(e){toast(e.message,true)});
+}
+function ngApproveSeller(uid){api('POST','/api/nigaria/admin/sellers/'+encodeURIComponent(uid)+'/approve',{}).then(function(){toast('Đã duyệt seller');vMarketAdmin()}).catch(function(e){toast(e.message,true)})}
+function ngResolveComplaint(id,decision){if(!confirm('Xác nhận xử lý khiếu nại?'))return;api('POST','/api/nigaria/admin/complaints/'+id+'/resolve',{decision:decision}).then(function(){toast('Đã xử lý');vMarketAdmin()}).catch(function(e){toast(e.message,true)})}
+function ngBackupGist(){api('POST','/api/nigaria/admin/backup-gist',{}).then(function(d){toast('Đã tạo Gist backup');if(d.url)window.open(d.url,'_blank')}).catch(function(e){toast(e.message,true)})}
+function vMarket(){
+ M('<div class="card"><div class="row" style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap"><div><h2>🛍️ Nigaria Marketplace</h2><p class="hint">Chợ cộng đồng • thanh toán bằng coin • tiền seller được giữ đến khi hoàn tất đơn</p></div><button class="btn sm" onclick="vMarket()">Làm mới</button></div><div id="ngMarketSummary" class="grid" style="margin-top:14px"></div></div>'
+ +'<div class="card"><h3>Đổi coin sang ACOIN</h3><p class="hint">Tỷ giá hiển thị ở trên. Chỉ đổi số coin chia hết cho tỷ giá.</p><input id="ngExchangeAmount" class="field" type="number" min="5" placeholder="Số coin muốn đổi"><button class="btn sm" onclick="ngExchange()">Đổi ACOIN</button></div>'
+ +'<div class="card"><h3>Đăng ký người bán</h3><p class="hint">Yêu cầu sẽ được admin duyệt trước khi bạn đăng sản phẩm.</p><button class="btn" onclick="ngApplySeller()">Gửi yêu cầu seller</button><span id="ngSellerStatus" class="hint" style="margin-left:10px"></span></div>'
+ +'<div class="card"><h3>Đăng sản phẩm</h3><div class="grid"><input id="ngProdName" class="field" placeholder="Tên sản phẩm"><input id="ngProdPrice" class="field" type="number" min="1" placeholder="Giá coin"><input id="ngProdStock" class="field" type="number" min="1" placeholder="Tồn kho"><textarea id="ngProdDesc" class="field" placeholder="Mô tả sản phẩm"></textarea></div><button class="btn" onclick="ngCreateProduct()">Đăng bán</button></div>'
+ +'<div class="card"><h3>Sản phẩm đang bán</h3><div id="ngProducts" class="grid"><div class="m">Đang tải...</div></div></div>'
+ +'<div class="card"><h3>Đơn hàng của tôi</h3><div id="ngOrders"><div class="m">Đang tải...</div></div></div>'
+ +'<div class="card"><h3>Chat riêng</h3><p class="hint">Nhắn tin bằng Discord ID người nhận đã liên kết.</p><input id="ngPartner" class="field" placeholder="Discord ID người nhận"><button class="btn sm" onclick="ngLoadChat()">Tải hội thoại</button><div id="ngChat" style="margin:12px 0"></div><textarea id="ngMessage" class="field" placeholder="Tin nhắn (tối đa 1000 ký tự)"></textarea><button class="btn" onclick="ngSendChat()">Gửi tin</button></div>');
+ ngLoadMarket();
+}
+function ngLoadMarket(){
+ Promise.all([api('GET','/api/nigaria/summary'),api('GET','/api/nigaria/market/products'),api('GET','/api/nigaria/market/orders')]).then(function(a){
+  var s=a[0],ps=a[1].products||[],os=a[2].orders||[];
+  $('ngMarketSummary').innerHTML='<div class="stat"><b>'+num(s.coin)+'</b><span>Coin</span></div><div class="stat"><b>'+num(s.acoin)+'</b><span>ACOIN</span></div><div class="stat"><b>'+esc(s.sellerStatus)+'</b><span>Trạng thái seller</span></div><div class="stat"><b>'+num(s.exchangeRate)+'</b><span>Coin / ACOIN</span></div>';
+  $('ngSellerStatus').textContent='Trạng thái: '+s.sellerStatus;
+  $('ngProducts').innerHTML=ps.length?ps.map(function(p){return '<div class="card"><b>'+esc(p.name)+'</b><p class="hint">'+esc(p.description||'')+'</p><p>Giá: <b>'+num(p.price)+' coin</b> • Còn '+num(p.stock)+'</p><p class="hint">Người bán: '+esc(p.sellerName)+'</p><div class="row"><input class="field" id="ngQty_'+esc(p.id)+'" type="number" min="1" max="'+p.stock+'" value="1" style="max-width:90px"><button class="btn sm" onclick="ngBuy(\\''+esc(p.id)+'\\')">Mua</button></div></div>'}).join(''):'<p class="hint">Chưa có sản phẩm.</p>';
+  $('ngOrders').innerHTML=os.length?os.map(function(o){var action='';if(o.buyerId===ME.user.id&&(o.status==='delivered'))action='<button class="btn sm" onclick="ngOrderAction(\\''+o.id+'\\',\\'confirm\\')">Xác nhận nhận hàng</button> <button class="btn sm bad" onclick="ngComplaint(\\''+o.id+'\\')">Khiếu nại</button>';if(o.sellerId===ME.user.id&&o.status==='paid')action='<button class="btn sm" onclick="ngOrderAction(\\''+o.id+'\\',\\'delivered\\')">Đánh dấu đã giao</button>';return '<div class="row" style="justify-content:space-between;gap:10px;padding:10px 0;border-bottom:1px solid var(--edge)"><div><b>'+esc(o.productName)+'</b><div class="hint">#'+esc(o.id.slice(0,8))+' • '+num(o.total)+' coin • '+esc(o.status)+'</div></div>'+action+'</div>'}).join(''):'<p class="hint">Chưa có đơn hàng.</p>';
+ }).catch(function(e){$('ngProducts').innerHTML=errBox(e.message)});
+}
+function ngApplySeller(){api('POST','/api/nigaria/market/seller',{}).then(function(d){toast('Yêu cầu seller: '+d.status);ngLoadMarket()}).catch(function(e){toast(e.message,true)})}
+function ngCreateProduct(){var b={name:$('ngProdName').value,price:Number($('ngProdPrice').value),stock:Number($('ngProdStock').value),description:$('ngProdDesc').value};api('POST','/api/nigaria/market/products',b).then(function(){toast('Đã đăng sản phẩm');vMarket()}).catch(function(e){toast(e.message,true)})}
+function ngBuy(pid){var q=Number($('ngQty_'+pid).value||1);if(!confirm('Xác nhận mua sản phẩm bằng coin?'))return;api('POST','/api/nigaria/market/buy',{productId:pid,quantity:q}).then(function(){toast('Đặt hàng thành công');ngLoadMarket()}).catch(function(e){toast(e.message,true)})}
+function ngOrderAction(id,action){api('POST','/api/nigaria/market/orders/'+id+'/'+action,{}).then(function(){toast('Đã cập nhật đơn');ngLoadMarket()}).catch(function(e){toast(e.message,true)})}
+function ngLoadChat(){var p=$('ngPartner').value.trim();api('GET','/api/nigaria/chat/'+encodeURIComponent(p)).then(function(d){$('ngChat').innerHTML=(d.messages||[]).map(function(m){return '<div class="hint" style="padding:7px;border-bottom:1px solid var(--edge)"><b>'+esc(m.from)+'</b>: '+esc(m.message)+' <small>'+ago(m.createdAt)+'</small></div>'}).join('')||'<p class="hint">Chưa có tin nhắn.</p>'}).catch(function(e){toast(e.message,true)})}
+function ngSendChat(){var p=$('ngPartner').value.trim(),m=$('ngMessage').value;api('POST','/api/nigaria/chat/'+encodeURIComponent(p),{message:m}).then(function(){$('ngMessage').value='';ngLoadChat();toast('Đã gửi tin nhắn')}).catch(function(e){toast(e.message,true)})}
+
 function M(h){$('main').innerHTML=h}
 function errBox(m){return '<div class="err">'+esc(m)+'</div>'}
 
