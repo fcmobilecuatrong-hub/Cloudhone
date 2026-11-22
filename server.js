@@ -149,6 +149,26 @@ function formatWeekRange(weekStart) {
 }
 
 // WEB SERVER
+// ── Auto-redeploy Railway vsphone mỗi 30 phút ──────────────────────
+async function redeployVsphone() {
+    const token = process.env.RAILWAY_API_TOKEN;
+    const serviceId = process.env.VSPHONE_SERVICE_ID;
+    const envId = process.env.VSPHONE_ENV_ID;
+    if (!token || !serviceId) return;
+    const query = `mutation { serviceInstanceRedeploy(serviceId: "${serviceId}"${envId ? `, environmentId: "${envId}"` : ''}) }`;
+    try {
+        const r = await fetch('https://backboard.railway.app/graphql/v2', { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ query }), signal: AbortSignal.timeout(15000) });
+        const d = await r.json();
+        if (d.errors) console.log('[vsphone-redeploy] lỗi:', d.errors[0].message);
+        else console.log('[vsphone-redeploy] ✓ redeploy lúc', new Date().toLocaleTimeString('vi-VN'));
+    } catch (e) { console.log('[vsphone-redeploy] lỗi:', e.message); }
+}
+if (process.env.RAILWAY_API_TOKEN && process.env.VSPHONE_SERVICE_ID) {
+    setInterval(redeployVsphone, 30 * 60 * 1000);
+    console.log('[vsphone-redeploy] auto-redeploy mỗi 30 phút đã bật');
+}
+
+
 app.get('/redeem', async (req, res) => {
     const { sid } = req.query;
     const renderError = (msg) => res.status(403).send(`
@@ -349,6 +369,9 @@ async function onReady(client, token, botId) {
         new SlashCommandBuilder().setName('reg').setDescription('Chọn loại cloud và lấy tài khoản (10 xu)'),
         new SlashCommandBuilder().setName('buycloud').setDescription('Mua cloud phone: nhập email|mật khẩu'),
         new SlashCommandBuilder().setName('daily').setDescription('Điểm danh nhận 20 xu'),
+        new SlashCommandBuilder().setName('ketnoi').setDescription('Liên kết tài khoản Dashboard web với Discord của bạn')
+            .addStringOption(o => o.setName('token').setDescription('Token lấy ở Dashboard > Cài đặt').setRequired(true).setMaxLength(40)),
+        new SlashCommandBuilder().setName('ngatketnoi').setDescription('Hủy mọi liên kết Dashboard web đang gắn với Discord của bạn'),
         new SlashCommandBuilder().setName('youtube').setDescription('Đăng ký kênh YouTube nhận xu mỗi ngày'),
         new SlashCommandBuilder().setName('testwelcome').setDescription('Gửi thử lời chào mừng vào kênh welcome (Admin)'),
         new SlashCommandBuilder().setName('nhiemvu').setDescription('Đăng bảng nhiệm vụ nhận xu vào kênh này (Admin)'),
@@ -437,6 +460,7 @@ function regEmbeds() {
         .setColor(0x19b9f2)
         .setTitle('📋 Reg Panel')
         .setDescription('Chọn dịch vụ bên dưới để tạo tài khoản nhanh gọn.\n\n**Dịch vụ cloud**\n• 🌐 VMOS Cloud — Đang hoạt động\n• 🟠 VSPhone — Đang hoạt động\n• 🔴 UGPhone — Sắp có\n\n*Panel chỉ dùng được bởi người đã mở lệnh.*')
+
         .setFooter({ text: 'Kasumi Bot • Reg System' });
     return [embed];
 }
@@ -480,10 +504,7 @@ async function handleRegProvider(interaction, providerKey) {
             [mail = 'Không có', pass = 'Không có', code = 'Không có'] = data.content.split('|');
         }
         if (!mail || !pass || mail === 'Không có' || pass === 'Không có') throw new Error('API trả về tài khoản không đúng định dạng.');
-        const fields = [
-            { name: '📧 Tài khoản', value: `\`${mail}\`` },
-            { name: '🔑 Mật khẩu', value: `\`${pass}\`` },
-        ];
+        const fields = [{ name: '📧 Tài khoản', value: `\`${mail}\`` }, { name: '🔑 Mật khẩu', value: `\`${pass}\`` }];
         if (code) fields.push({ name: '🎁 Mã mời', value: `\`${code}\`` });
         fields.push({ name: '💡 Mẹo', value: 'Bấm **📋 Sao chép**, nhấn giữ tin nhắn hiện ra rồi chọn **Sao chép văn bản**. Dán vào `/buycloud`, hoặc bấm **🛒 Mua ngay**.' });
         const embed = new EmbedBuilder().setColor(prov.color).setAuthor(providerAuthor(prov)).setTitle('Lấy tài khoản thành công')
@@ -812,6 +833,35 @@ async function handleInteraction(interaction) {
     if (!interaction.isChatInputCommand()) return;
     if (interaction.commandName === 'buycloud') {
         return interaction.reply({ content: '**Chọn loại cloud bạn muốn mua:**', components: [buyMenu(interaction.client)], flags: MessageFlags.Ephemeral });
+    }
+    if (interaction.commandName === 'ketnoi') {
+        const uid = interaction.user.id;
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+        const tries = await redis.incr(`ketnoi_try_${uid}`);
+        if (tries === 1) await redis.expire(`ketnoi_try_${uid}`, 600);
+        if (tries > 10) return interaction.editReply('⛔ Bạn thử quá nhiều lần. Đợi 10 phút rồi thử lại.');
+        const norm = String(interaction.options.getString('token') || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+        if (!/^NGA[A-Z0-9]{12}$/.test(norm)) return interaction.editReply('❌ Token không đúng định dạng. Token có dạng `NGA-XXXX-XXXX-XXXX`, lấy ở Dashboard > Cài đặt.');
+        const webId = await redis.eval("local v=redis.call('GET',KEYS[1]); if v then redis.call('DEL',KEYS[1]) end return v", 1, `ketnoi_tok_${norm}`);
+        if (!webId || !/^[a-f0-9]{16}$/.test(webId)) return interaction.editReply('❌ Token sai, đã dùng hoặc đã hết hạn. Vào Dashboard > Cài đặt bấm **Tạo token mới**.');
+        await redis.del(`webtok_${webId}`);
+        await redis.set(`webacct_${webId}`, JSON.stringify({
+            discordId: uid,
+            name: interaction.user.globalName || interaction.user.username,
+            avatar: interaction.user.displayAvatarURL({ extension: 'png', size: 64 }),
+            at: Date.now()
+        }));
+        await redis.sadd(`discord_webs_${uid}`, webId);
+        await redis.del(`ketnoi_try_${uid}`);
+        return interaction.editReply('✅ **Liên kết thành công!** Quay lại Dashboard, trang sẽ tự mở Ví xu và Cloud Phone.\nNếu không phải bạn tạo token này, gõ `/ngatketnoi` để hủy.');
+    }
+    if (interaction.commandName === 'ngatketnoi') {
+        const uid = interaction.user.id;
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+        const ids = await redis.smembers(`discord_webs_${uid}`);
+        for (const w of ids) if (/^[a-f0-9]{16}$/.test(w)) await redis.del(`webacct_${w}`);
+        await redis.del(`discord_webs_${uid}`);
+        return interaction.editReply(ids.length ? `✅ Đã hủy ${ids.length} liên kết Dashboard. Muốn dùng lại thì lấy token mới và /ketnoi.` : 'ℹ️ Bạn chưa có liên kết Dashboard nào.');
     }
     const adminIds = await getAdminIds();
     const userId = interaction.user.id;
@@ -1435,8 +1485,9 @@ app.delete('/panel/api/update', panelAuth, deployAuth, async (req, res) => {
 setTimeout(() => redis.set('override_boot', '0').catch(() => {}), 60000);
 
 getPublicIp().then(ip => console.log('[IP] Địa chỉ IP máy chủ gọi ra ngoài:', ip || 'không lấy được'));
+
 require('./dashboard')(app, panelAuth, { redis, getBots, startBot, stopBot, saveBot, tokenOf, botView, running });
-require('./nigaria-upgrade')(app, { redis });
+
 (async () => {
     try {
         for (const b of await getBots()) {
