@@ -212,7 +212,7 @@ app.get('/icons/:name.png', (req, res) => {
 });
 
 app.get('/', (req, res) => res.send('Bot đang chạy ✅'));
-
+app.get('/health', (req, res) => res.json({ status: 'ok' }));
 // Tự truy cập web của chính mình mỗi 5 phút để Render không cho ngủ
 let SELF_URL = '';
 try { SELF_URL = getPublicBaseUrl(); } catch {}
