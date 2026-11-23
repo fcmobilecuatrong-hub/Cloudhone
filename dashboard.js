@@ -721,6 +721,64 @@ return tostring(amount)`;
         res.json({ ok: true });
     }));
 
+
+    // ---------- BXH xu tuần ----------
+    app.get('/api/admin/bxh', adminOnly, wrap(async (req, res) => {
+        if (!ctx.weeklyLeaderboardKey) return res.json({ top: [], rewards: [], week: null });
+        const key = ctx.weeklyLeaderboardKey();
+        const rows = await redis.zrevrange(key, 0, 5, 'WITHSCORES');
+        const top = [];
+        for (let i = 0; i < rows.length; i += 2) top.push({ id: rows[i], score: parseInt(rows[i+1]) || 0 });
+        const rewards = (process.env.TOP_REWARDS || '1000,700,500,300,250,150').split(',').map(Number).slice(0, 6);
+        res.json({ top, rewards, week: key });
+    }));
+    app.post('/api/admin/bxh/payout', adminOnly, wrap(async (req, res) => {
+        if (!ctx.settlePreviousWeek) throw fail('Bot chưa hỗ trợ tổng kết tuần qua API.', 503);
+        const client = [...(ctx.running || new Map()).values()][0];
+        if (!client) throw fail('Bot Discord chưa chạy.', 503);
+        await ctx.settlePreviousWeek(client, { send: async () => ({}) });
+        res.json({ ok: true, message: 'Đã tổng kết và cộng xu cho top. Thông báo Discord gửi qua kênh BXH.' });
+    }));
+
+    // ---------- Đơn BuyCloud ----------
+    app.get('/api/admin/orders', adminOnly, wrap(async (req, res) => {
+        const rows = await redis.lrange('buycloud_orders', 0, 49);
+        const orders = rows.map(r => { try { return JSON.parse(r); } catch { return null; } }).filter(Boolean);
+        res.json({ orders });
+    }));
+
+    // ---------- Reg Provider toggle ----------
+    app.get('/api/admin/providers', adminOnly, wrap(async (req, res) => {
+        const off = JSON.parse((await redis.get('reg_providers_off')) || '[]');
+        const providers = ['vmos','vsphone','ugphone'].map(k => ({ key: k, on: !off.includes(k) }));
+        res.json({ providers });
+    }));
+    app.post('/api/admin/providers/toggle', adminOnly, wrap(async (req, res) => {
+        const { key } = req.body || {};
+        if (!['vmos','vsphone','ugphone'].includes(key)) throw fail('Provider không hợp lệ');
+        const off = JSON.parse((await redis.get('reg_providers_off')) || '[]');
+        const idx = off.indexOf(key);
+        if (idx >= 0) off.splice(idx, 1); else off.push(key);
+        await redis.set('reg_providers_off', JSON.stringify(off));
+        res.json({ ok: true, key, on: !off.includes(key) });
+    }));
+
+    // ---------- Stock status ----------
+    app.get('/api/admin/stock', adminOnly, wrap(async (req, res) => {
+        const status = {};
+        for (const k of ['vmos','vsphone']) {
+            const raw = await redis.get('stock_status_' + k);
+            status[k] = raw ? JSON.parse(raw) : null;
+        }
+        res.json({ status });
+    }));
+    app.post('/api/admin/stock', adminOnly, wrap(async (req, res) => {
+        const { provider, status: st } = req.body || {};
+        if (!['vmos','vsphone'].includes(provider) || !['in','out'].includes(st)) throw fail('Dữ liệu không hợp lệ');
+        await redis.set('stock_status_' + provider, JSON.stringify({ status: st, at: Date.now() }));
+        res.json({ ok: true });
+    }));
+
     // ---------- Admin: sửa code trên GitHub (commit => Render tự deploy) ----------
     const okPath = p => typeof p === 'string' && /^[\w.\-\/]{1,120}$/.test(p) && !p.includes('..') && !/(^|\/)\.env/i.test(p) && !p.startsWith('/');
     app.get('/api/admin/gh/tree', adminOnly, wrap(async (req, res) => {
@@ -1276,7 +1334,7 @@ function boot(){api('GET','/api/me').then(function(m){ME=m;$('login').style.disp
 function startDashRefresh(){if(window._dashRefreshTimer)clearInterval(window._dashRefreshTimer);if(DASH_REFRESH>0)window._dashRefreshTimer=setInterval(function(){if(TAB==='deploy')vDeploy();else if(TAB==='db')loadDatabase();else if(TAB==='notify')loadNotify()},DASH_REFRESH*1000)}
 function head(){var u=ME.user;var av=u&&u.avatar?u.avatar:'data:image/gif;base64,R0lGODlhAQABAAAAACw=';$('av').src=av;$('sav').src=av;$('snm').textContent=u?u.name:'Admin';$('hc').textContent=u&&ME.linked?num(ME.coins)+' xu':'';$('shc').textContent=u?(ME.linked?num(ME.coins)+' xu':'Chưa liên kết'):'Admin'}
 function refreshMe(){return api('GET','/api/me').then(function(m){ME=m;head();var b=$('bal');if(b)b.textContent=num(ME.coins)})}
-function tabList(){var t=[];if(ME.user){if(ME.linked)t.push(['wallet','💰','Ví xu'],['cloud','📱','Cloud Phone'],['top','🏆','Bảng xếp hạng']);t.push(['settings','⚙️','Cài đặt'],['guide','📖','Hướng dẫn'])}if(ME.admin){t.push(['deploy','🚀','Deploy'],['code','💻','GitHub'],['env','🔑','Biến MT'],['bots','🤖','Bot'],['gen','🎁','Gift Code'],['notify','📣','Thông báo'],['db','🗄️','Database'])}return t}
+function tabList(){var t=[];if(ME.user){if(ME.linked)t.push(['wallet','💰','Ví xu'],['cloud','📱','Cloud Phone'],['top','🏆','Bảng xếp hạng']);t.push(['settings','⚙️','Cài đặt'],['guide','📖','Hướng dẫn'])}if(ME.admin){t.push(['deploy','🚀','Deploy'],['code','💻','GitHub'],['env','🔑','Biến MT'],['bots','🤖','Bot'],['gen','🎁','Gift Code'],['notify','📣','Thông báo'],['cloudstatus','☁️','Cloud Status'],['bxhtuan','🏆','BXH Tuần'],['orders','🛒','Đơn BuyCloud'],['providers','⚙️','Reg Provider'],['db','🗄️','Database'])}return t}
 function buildNav(){
   var list=tabList();
   var user=list.filter(function(t){return ['wallet','cloud','top'].indexOf(t[0])>=0});
@@ -1289,7 +1347,7 @@ function buildNav(){
   $('sideNav').innerHTML=h;
   Array.prototype.forEach.call(document.querySelectorAll('.nav-item[data-tab]'),function(b){b.addEventListener('click',function(){go(b.dataset.tab)})});
 }
-function go(t){clearInterval(window._lkTimer);TAB=t;buildNav();closeSide();M('<div class="m">Đang tải...</div>');({settings:vSettings,guide:vGuide,wallet:vWallet,cloud:vCloud,top:vTop,deploy:vDeploy,code:vCode,env:vEnv,bots:vBots,gen:vGen,notify:vNotify,db:vDatabase})[t]()}
+function go(t){clearInterval(window._lkTimer);if(typeof csStop==='function')csStop();TAB=t;buildNav();closeSide();M('<div class="m">Đang tải...</div>');({settings:vSettings,guide:vGuide,wallet:vWallet,cloud:vCloud,top:vTop,deploy:vDeploy,code:vCode,env:vEnv,bots:vBots,gen:vGen,notify:vNotify,cloudstatus:vCloudStatus,bxhtuan:vBxhTuan,orders:vOrders,providers:vProviders,db:vDatabase})[t]()}
 function M(h){$('main').innerHTML=h}
 function errBox(m){return '<div class="err">'+esc(m)+'</div>'}
 
@@ -1366,6 +1424,48 @@ function ghRender(r){if(!r.ok)return errBox(r.error);var g=r.data;
 function vDeploy(){M('<div class="m">Đang tải...</div>');api('GET','/api/admin/overview').then(function(d){OV=d;
  M('<div class="grid"><div><h3 class="hint">RENDER</h3>'+ovRender(d.render)+'</div><div><h3 class="hint">RAILWAY</h3>'+ovRender(d.railway)+'</div><div><h3 class="hint">GITHUB</h3>'+ghRender(d.github)+'</div></div>')}).catch(function(e){M(errBox(e.message))})}
 
+
+/* ---- Cloud Status ---- */
+function vCloudStatus(){
+ M('<div class="card"><h3>Trạng thái máy Cloud Phone (tự làm mới mỗi 60s)</h3><p class="hint" id="cs_time">Đang kiểm tra...</p><div style="display:grid;grid-template-columns:1fr 1fr;gap:10px"><div class="card" style="margin:0"><h3>VMOS Cloud</h3><div style="font-size:28px;font-weight:800" id="cs_vmos">...</div><div class="hint" id="cs_vt"></div></div><div class="card" style="margin:0"><h3>VSPhone</h3><div style="font-size:28px;font-weight:800" id="cs_vs">...</div><div class="hint" id="cs_st"></div></div></div><div class="acts" style="margin-top:14px"><button class="btn sm" data-a="csRefresh">🔄 Làm mới</button></div></div>');
+ csStart()}
+var _csT=null;
+function csStop(){if(_csT){clearInterval(_csT);_csT=null}}
+function csStart(){csStop();csLoad();_csT=setInterval(csLoad,60000)}
+function csLoad(){api('GET','/api/admin/stock').then(function(d){$('cs_time').textContent='Cập nhật lúc '+new Date().toLocaleTimeString('vi-VN');function set(id,tid,st){var el=$(id),tl=$(tid);if(!el)return;if(st&&st.status==='in'){el.textContent='✅ Có máy';el.style.color='var(--ok)'}else if(st&&st.status==='out'){el.textContent='⛔ Hết máy';el.style.color='var(--bad)'}else{el.textContent='❓ Chưa rõ';el.style.color='var(--mut)'}tl.textContent=st&&st.at?(Math.round((Date.now()-st.at)/60000)||0)+'ph trước':''}set('cs_vmos','cs_vt',d.status.vmos);set('cs_vs','cs_st',d.status.vsphone)}).catch(function(e){var t=$('cs_time');if(t)t.textContent='Lỗi: '+e.message})}
+
+/* ---- BXH Tuần ---- */
+function vBxhTuan(){
+ M('<div class="card"><h3>Bảng xếp hạng xu tuần</h3><p class="hint">Chỉ tính xu từ nhiệm vụ vượt link. Top 1–6 được thưởng mỗi kỳ.</p><div id="bxh_rows"><div class="m">Đang tải...</div></div><div class="acts" style="margin-top:12px"><button class="btn sm bad" data-a="bxhPay">🎁 Tổng kết & trả thưởng ngay</button><button class="btn sm ghost" data-a="bxhLoad">🔄 Làm mới</button></div></div>');
+ bxhLoad()}
+function bxhLoad(){api('GET','/api/admin/bxh').then(function(d){var M2=['🥇','🥈','🥉','4️⃣','5️⃣','6️⃣'];$('bxh_rows').innerHTML=(d.top&&d.top.length)?d.top.map(function(r,i){return '<div class="li">'+M2[i]+' <b>'+esc(r.id)+'</b> — <b>'+r.score+'</b> xu'+(d.rewards&&d.rewards[i]?' <span class="chip warn">+'+d.rewards[i]+' xu</span>':'')+'</div>'}).join(''):'<div class="hint">Chưa có ai trong tuần này.</div>'}).catch(function(e){$('bxh_rows').innerHTML='<div class="err">'+esc(e.message)+'</div>'})}
+
+/* ---- Đơn BuyCloud ---- */
+function vOrders(){
+ M('<div class="card"><h3>Đơn BuyCloud gần đây (tối đa 50)</h3><p class="hint" id="ord_t">Đang tải...</p><div id="ord_body"></div><div class="acts"><button class="btn sm ghost" data-a="ordLoad">🔄 Làm mới</button></div></div>');
+ ordLoad()}
+function ordLoad(){
+ api('GET','/api/admin/orders').then(function(r){
+  var rows=r.orders||[];
+  $('ord_t').textContent='Tổng: '+rows.length+' đơn';
+  $('ord_body').innerHTML=rows.length?rows.map(function(o){
+   var t=new Date(o.at).toLocaleString('vi-VN');
+   return '<div class="li"><span class="chip '+(o.ok?'ok':'bad')+'">'+(o.ok?'✅':'❌')+'</span> <b>'+esc(o.cloud||'')+'</b> — '+esc(o.acc||'')+'<br><span class="hint">'+esc(o.userId||'')+' | '+t+' | '+esc((o.msg||'').slice(0,80))+'</span></div>'
+  }).join(''):'<div class="hint">Chưa có đơn nào.</div>'
+ }).catch(function(e){$('ord_body').innerHTML='<div class="err">'+esc(e.message)+'</div>'})}
+
+/* ---- Reg Provider ---- */
+function vProviders(){
+ M('<div class="card"><h3>Bật/Tắt Cloud Provider (/reg)</h3><p class="hint">Tắt provider sẽ disable nút đó trong /reg.</p><div id="prov_body">Đang tải...</div></div>');
+ provLoad()}
+function provLoad(){
+ api('GET','/api/admin/providers').then(function(r){
+  $('prov_body').innerHTML=(r.providers||[]).map(function(p){
+   var lb={'vmos':'VMOS Cloud','vsphone':'VSPhone','ugphone':'UGPhone'}[p.key]||p.key;
+   return '<div class="li row" style="justify-content:space-between;align-items:center;gap:12px"><span style="font-weight:600">'+esc(lb)+'</span><button class="btn sm '+(p.on?'bad':'ok')+'" data-a="provToggle" data-k="'+p.key+'">'+(p.on?'🔴 Tắt':'✅ Bật')+'</button></div>'
+  }).join('')||'<div class="hint">Không có provider.</div>'
+ }).catch(function(e){$('prov_body').innerHTML='<div class="err">'+esc(e.message)+'</div>'})}
+
 /* ---- Database / Redis ---- */
 function vDatabase(){M('<div class="card"><h3>Redis · Database dashboard</h3><div id="dbs" class="m">Đang kiểm tra...</div><div class="acts"><button class="btn sm" data-a="dbrefresh">Làm mới</button><button class="btn sm ok" data-a="dbsnapshot">Lưu snapshot hạ tầng</button></div></div><div class="card"><h3>Lịch sử thao tác admin</h3><div id="dbaudit" class="m">Đang tải...</div></div><div class="card"><h3>Snapshot hạ tầng</h3><div id="dbsnapshots" class="m">Đang tải...</div></div><div class="card"><h3>Cài đặt dashboard</h3><label class="hint">Tự làm mới (giây, 0 = tắt)</label><input id="dbrefreshsec" type="number" min="0" max="300" value="0"><label class="hint">Tab mặc định</label><select id="dbdefault"><option value="deploy">Deploy</option><option value="code">GitHub</option><option value="env">Biến môi trường</option><option value="bots">Bot</option><option value="gen">Gift Code</option><option value="notify">Thông báo</option><option value="db">Database</option></select><div class="acts"><button class="btn" data-a="dbsettings">Lưu cài đặt</button></div></div>');loadDatabase()}
 function loadDatabase(){api('GET','/api/admin/db/summary').then(function(d){$('dbs').innerHTML='<div class="kv">Redis: '+esc(d.stats.status)+' · Keys: '+esc(d.stats.keys)+' · RAM: '+esc(d.stats.usedMemory||'n/a')+' · Peak: '+esc(d.stats.peakMemory||'n/a')+'</div><div class="m">Audit: '+d.auditCount+' · Snapshots: '+d.snapshotCount+' · Snapshot cuối: '+(d.lastSnapshot?ago(d.lastSnapshot.at):'chưa có')+'</div>'}).catch(function(e){$('dbs').innerHTML=errBox(e.message)});
@@ -1430,6 +1530,11 @@ document.addEventListener('click',function(ev){
  else if(a==='rerun'){busy(b,api('POST','/api/admin/github/rerun/'+b.dataset.id)).then(done('Đã chạy lại workflow')).catch(bad)}
  else if(a==='cload'){var path=$('cf')&&$('cf').value;if(!path)return;busy(b,api('GET','/api/admin/gh/file?path='+encodeURIComponent(path))).then(function(r){FILE=r;showEditor()}).catch(bad)}
  else if(a==='cnew'){var path=prompt('Đường dẫn file mới, ví dụ src/new.js');if(!path)return;if(!/^[\w.\-\/]{1,120}$/.test(path)||path.indexOf('..')>=0||/(^|\/)\.env/i.test(path)||path[0]==='/')return toast('Đường dẫn không hợp lệ',true);FILE={path:path,sha:null,content:''};showEditor()}
+ else if(a==='csRefresh'){csLoad()}
+ else if(a==='bxhLoad'){bxhLoad()}
+ else if(a==='bxhPay'){if(!confirm('Tổng kết BXH tuần ngay?'))return;busy(b,api('POST','/api/admin/bxh/payout')).then(function(r){toast('Đã trả thưởng: '+(r.message||'xong'));bxhLoad()}).catch(bad)}
+ else if(a==='ordLoad'){ordLoad()}
+ else if(a==='provToggle'){var k2=b.dataset.k;if(!k2)return;busy(b,api('POST','/api/admin/providers/toggle',{key:k2})).then(function(){toast('Đã đổi trạng thái '+k2);provLoad()}).catch(bad)}
  else if(a==='csave'){if(!FILE)return;if(!confirm((FILE.sha?'Commit sửa ':'Tạo file ')+FILE.path+' lên GitHub?'))return;busy(b,api('PUT','/api/admin/gh/file',{path:FILE.path,content:$('ct').value,sha:FILE.sha,message:$('cm').value})).then(function(r){FILE.sha=r.sha;FILE.content=$('ct').value;toast('Đã commit '+r.commit);}).catch(bad)}
  else if(a==='cdelete'){if(!FILE||!FILE.sha||!confirm('Xóa vĩnh viễn '+FILE.path+' khỏi GitHub?'))return;busy(b,api('DELETE','/api/admin/gh/file',{path:FILE.path,sha:FILE.sha,message:$('cm').value})).then(done('Đã xóa file khỏi GitHub',function(){FILE=null;$('ced').innerHTML='';vCode()})).catch(bad)}
  else if(a==='eload'){loadEnv()}

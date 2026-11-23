@@ -59,24 +59,12 @@ function weeklyRewards() {
         .split(',').map(v => Math.max(0, parseInt(v.trim(), 10) || 0));
     return Array.from({ length: 6 }, (_, i) => values[i] || 0);
 }
-async function addEarnedCoins(userId, amount) {
-    const value = Math.floor(Number(amount));
-    if (!userId || !Number.isFinite(value) || value <= 0) throw new Error('Số xu cộng không hợp lệ.');
-    const key = weeklyLeaderboardKey();
-    return redis.multi()
-        .incrby(`coins_${userId}`, value)
-        .zincrby('leaderboard', value, userId)
-        .zincrby(key, value, userId)
-        .exec();
-}
-
 // Nhận thưởng một lần: khóa chống nhận trùng và cộng số dư/BXH trong cùng Lua script.
 const CLAIM_REWARD_LUA = `
 local claimed = redis.call('SET', KEYS[1], '1', 'EX', ARGV[2], 'NX')
 if not claimed then return 0 end
 redis.call('INCRBY', KEYS[2], ARGV[1])
 redis.call('ZINCRBY', KEYS[3], ARGV[1], ARGV[3])
-redis.call('ZINCRBY', KEYS[4], ARGV[1], ARGV[3])
 return 1
 `;
 async function claimEarnedCoinsOnce(claimKey, userId, amount, ttlSeconds) {
@@ -85,7 +73,7 @@ async function claimEarnedCoinsOnce(claimKey, userId, amount, ttlSeconds) {
     if (!claimKey || !userId || !Number.isSafeInteger(value) || value <= 0 || !Number.isFinite(ttl)) {
         throw new Error('Thông tin nhận thưởng không hợp lệ.');
     }
-    return Number(await redis.eval(CLAIM_REWARD_LUA, 4, claimKey, `coins_${userId}`, 'leaderboard', weeklyLeaderboardKey(), value, ttl, userId)) === 1;
+    return Number(await redis.eval(CLAIM_REWARD_LUA, 3, claimKey, `coins_${userId}`, 'leaderboard', value, ttl, userId)) === 1;
 }
 
 const REDEEM_SESSION_LUA = `
@@ -98,6 +86,7 @@ local amount = tonumber(ARGV[1])
 local balance = redis.call('INCRBY', 'coins_' .. data.userId, amount)
 redis.call('ZINCRBY', 'leaderboard', amount, data.userId)
 redis.call('ZINCRBY', ARGV[2], amount, data.userId)
+redis.call('EXPIRE', ARGV[2], 5184000)
 return cjson.encode({ userId = data.userId, provider = data.provider or '', balance = balance })
 `;
 
@@ -109,7 +98,6 @@ if not amount or amount <= 0 or amount ~= math.floor(amount) then return redis.e
 redis.call('DEL', KEYS[1])
 local balance = redis.call('INCRBY', 'coins_' .. ARGV[1], amount)
 redis.call('ZINCRBY', 'leaderboard', amount, ARGV[1])
-redis.call('ZINCRBY', ARGV[2], amount, ARGV[1])
 return tostring(amount)
 `;
 
@@ -122,7 +110,6 @@ if balance < amount then return { 0, balance } end
 redis.call('DECRBY', KEYS[1], amount)
 redis.call('INCRBY', KEYS[2], net)
 redis.call('ZINCRBY', KEYS[3], net, ARGV[3])
-redis.call('ZINCRBY', KEYS[4], net, ARGV[3])
 return { 1, balance - amount }
 `;
 
@@ -149,26 +136,6 @@ function formatWeekRange(weekStart) {
 }
 
 // WEB SERVER
-// ── Auto-redeploy Railway vsphone mỗi 30 phút ──────────────────────
-async function redeployVsphone() {
-    const token = process.env.RAILWAY_API_TOKEN;
-    const serviceId = process.env.VSPHONE_SERVICE_ID;
-    const envId = process.env.VSPHONE_ENV_ID;
-    if (!token || !serviceId) return;
-    const query = `mutation { serviceInstanceRedeploy(serviceId: "${serviceId}"${envId ? `, environmentId: "${envId}"` : ''}) }`;
-    try {
-        const r = await fetch('https://backboard.railway.app/graphql/v2', { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ query }), signal: AbortSignal.timeout(15000) });
-        const d = await r.json();
-        if (d.errors) console.log('[vsphone-redeploy] lỗi:', d.errors[0].message);
-        else console.log('[vsphone-redeploy] ✓ redeploy lúc', new Date().toLocaleTimeString('vi-VN'));
-    } catch (e) { console.log('[vsphone-redeploy] lỗi:', e.message); }
-}
-if (process.env.RAILWAY_API_TOKEN && process.env.VSPHONE_SERVICE_ID) {
-    setInterval(redeployVsphone, 30 * 60 * 1000);
-    console.log('[vsphone-redeploy] auto-redeploy mỗi 30 phút đã bật');
-}
-
-
 app.get('/redeem', async (req, res) => {
     const { sid } = req.query;
     const renderError = (msg) => res.status(403).send(`
@@ -185,6 +152,8 @@ app.get('/redeem', async (req, res) => {
         if (!redeemed) return renderError("Link này đã được sử dụng hoặc đã hết hạn.");
         const { userId, provider, balance: newBalance } = JSON.parse(redeemed);
         console.log(`[WEB] ${userId} +50 xu (${provider}). Số dư: ${newBalance}`);
+        // đếm link thành công để /vmosfree kiểm tra
+        const ld = getTodayString(); redis.incr(`link_count_${userId}_${ld}`).then(() => redis.expire(`link_count_${userId}_${ld}`, secondsUntilVnMidnight())).catch(() => {});
         res.send(`
             <body style="background:#080d0b; color:#fff; display:flex; justify-content:center; align-items:center; height:100vh; font-family:sans-serif; margin:0;">
                 <div style="background:#101a14; padding:30px; border-radius:16px; border:1px solid #39f58a; text-align:center; max-width:400px; width:100%;">
@@ -237,8 +206,11 @@ async function getWeeklyLeaderboardChannel(client) {
     }
 
     for (const guild of client.guilds.cache.values()) {
-        let channel = guild.channels.cache.find(ch => ch.type === ChannelType.GuildText &&
-            ['bxhxutuan', 'bxhxu'].includes(String(ch.name || '').toLowerCase().replace(/[^a-z0-9]/g, '')));
+        let channel = guild.channels.cache.find(ch => {
+            if (ch.type !== ChannelType.GuildText) return false;
+            const n = String(ch.name || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+            return n === 'bxhxu' || (n.includes('bxh') && n.includes('tuan'));
+        });
         if (channel) return channel;
     }
 
@@ -269,7 +241,7 @@ async function updateWeeklyLeaderboardBoard(client, channel) {
     const embed = new EmbedBuilder().setColor(0xffc107).setTitle('🏆 BXH XU TUẦN')
         .setDescription(lines.length ? lines.join('\n') : 'Chưa có ai tích lũy xu trong tuần này.')
         .addFields({ name: 'Thời gian', value: `${formatWeekRange(weekStart)}\nTổng kết: 00:00 thứ Hai` })
-        .setFooter({ text: 'Top 1–6 • Cập nhật tự động mỗi 5 phút' });
+        .setFooter({ text: 'Tính theo xu vượt link trong tuần • Top 1–6 • Tự cập nhật mỗi 5 phút' });
     const messageKey = `weekly_board_message:${channel.id}`;
     const savedId = await redis.get(messageKey);
     if (savedId) {
@@ -369,9 +341,6 @@ async function onReady(client, token, botId) {
         new SlashCommandBuilder().setName('reg').setDescription('Chọn loại cloud và lấy tài khoản (10 xu)'),
         new SlashCommandBuilder().setName('buycloud').setDescription('Mua cloud phone: nhập email|mật khẩu'),
         new SlashCommandBuilder().setName('daily').setDescription('Điểm danh nhận 20 xu'),
-        new SlashCommandBuilder().setName('ketnoi').setDescription('Liên kết tài khoản Dashboard web với Discord của bạn')
-            .addStringOption(o => o.setName('token').setDescription('Token lấy ở Dashboard > Cài đặt').setRequired(true).setMaxLength(40)),
-        new SlashCommandBuilder().setName('ngatketnoi').setDescription('Hủy mọi liên kết Dashboard web đang gắn với Discord của bạn'),
         new SlashCommandBuilder().setName('youtube').setDescription('Đăng ký kênh YouTube nhận xu mỗi ngày'),
         new SlashCommandBuilder().setName('testwelcome').setDescription('Gửi thử lời chào mừng vào kênh welcome (Admin)'),
         new SlashCommandBuilder().setName('nhiemvu').setDescription('Đăng bảng nhiệm vụ nhận xu vào kênh này (Admin)'),
@@ -455,28 +424,33 @@ function inRegChannel(interaction) {
     return cat.includes('cloudphone');
 }
 const REG_DENY = '❌ Lệnh `/reg` chỉ dùng được trong các kênh thuộc danh mục **cloudphone**.';
-function regEmbeds() {
+async function regEmbeds() {
+    const _off = JSON.parse((await redis.get('reg_providers_off')) || '[]');
+    const _st = k => _off.includes(k) ? '🔴 Tạm tắt' : (k === 'ugphone' ? '⚙️ Sắp có' : '✅ Hoạt động');
     const embed = new EmbedBuilder()
         .setColor(0x19b9f2)
         .setTitle('📋 Reg Panel')
-        .setDescription('Chọn dịch vụ bên dưới để tạo tài khoản nhanh gọn.\n\n**Dịch vụ cloud**\n• 🌐 VMOS Cloud — Đang hoạt động\n• 🟠 VSPhone — Đang hoạt động\n• 🔴 UGPhone — Sắp có\n\n*Panel chỉ dùng được bởi người đã mở lệnh.*')
-
+        .setDescription(`Chọn dịch vụ bên dưới để tạo tài khoản nhanh gọn.\n\n**Dịch vụ cloud**\n• 🌐 VMOS Cloud — ${_st('vmos')}\n• 🟠 VSPhone — ${_st('vsphone')}\n• 🔴 UGPhone — ${_st('ugphone')}\n\n*Panel chỉ được dùng bởi người đã mở lệnh.*`)
         .setFooter({ text: 'Kasumi Bot • Reg System' });
     return [embed];
 }
-function regMenu(client) {
-    const emojiFor = (key, fallback) => (client && client.cloudEmojis && client.cloudEmojis[key]) || fallback;
+async function regMenu(client) {
+    const _off2 = JSON.parse((await redis.get('reg_providers_off')) || '[]');
+    const emojiFor = (k,fb) => (client&&client.cloudEmojis&&client.cloudEmojis[k])||fb;
+    const mkBtn = (id,lbl,em,st,dis) => { const b=new ButtonBuilder().setCustomId(id).setLabel(lbl).setEmoji(em).setStyle(st); if(dis)b.setDisabled(true); return b; };
     return new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId('regprovider:vmos').setLabel('VMOS Cloud').setEmoji(emojiFor('vmos', '🌐')).setStyle(ButtonStyle.Success),
-        new ButtonBuilder().setCustomId('regprovider:vsphone').setLabel('VSPhone').setEmoji(emojiFor('vsphone', '🟠')).setStyle(ButtonStyle.Primary),
-        new ButtonBuilder().setCustomId('regprovider:ugphone').setLabel('UGPhone • Sắp có').setEmoji(emojiFor('ugphone', '🔴')).setStyle(ButtonStyle.Secondary)
+        mkBtn('regprovider:vmos',_off2.includes('vmos')?'VMOS (Tắt)':'VMOS Cloud',emojiFor('vmos','🌐'),ButtonStyle.Success,_off2.includes('vmos')),
+        mkBtn('regprovider:vsphone',_off2.includes('vsphone')?'VSPhone (Tắt)':'VSPhone',emojiFor('vsphone','🟠'),ButtonStyle.Primary,_off2.includes('vsphone')),
+        mkBtn('regprovider:ugphone','UGPhone • Sắp có',emojiFor('ugphone','🔴'),ButtonStyle.Secondary,true)
     );
 }
 async function handleRegProvider(interaction, providerKey) {
     if (!inRegChannel(interaction)) return interaction.update({ content: REG_DENY, embeds: [], components: [] });
     const prov = CLOUD_PROVIDERS[providerKey];
-    if (!prov) return interaction.update({ content: '❌ Lựa chọn không hợp lệ.', embeds: regEmbeds(), components: [regMenu(interaction.client)] });
-    if (!prov.ready) return interaction.update({ content: `⏳ ${prov.name} sắp có, bạn chọn loại khác nhé.`, embeds: regEmbeds(), components: [regMenu(interaction.client)] });
+    if (!prov) return interaction.update({ content: '❌ Lựa chọn không hợp lệ.', embeds: await regEmbeds(), components: [await regMenu(interaction.client)] });
+    const _offCheck = JSON.parse((await redis.get('reg_providers_off')) || '[]');
+    if (_offCheck.includes(providerKey)) return interaction.update({ content: `🔴 **${prov.name}** đang tạm tắt, chờ admin bật lại nhé.`, embeds: await regEmbeds(), components: [await regMenu(interaction.client)] });
+    if (!prov.ready) return interaction.update({ content: `⏳ ${prov.name} sắp có, bạn chọn loại khác nhé.`, embeds: await regEmbeds(), components: [await regMenu(interaction.client)] });
     await interaction.deferUpdate();
     const userId = interaction.user.id;
     let charged = false;
@@ -484,7 +458,7 @@ async function handleRegProvider(interaction, providerKey) {
         const remaining = await redis.decrby(`coins_${userId}`, 10);
         if (remaining < 0) {
             await redis.incrby(`coins_${userId}`, 10);
-            return interaction.editReply({ content: '❌ Không đủ 10 xu.', embeds: regEmbeds(), components: [regMenu(interaction.client)] });
+            return interaction.editReply({ content: '❌ Không đủ 10 xu.', embeds: await regEmbeds(), components: [await regMenu(interaction.client)] });
         }
         charged = true;
         let mail, pass, code;
@@ -504,7 +478,10 @@ async function handleRegProvider(interaction, providerKey) {
             [mail = 'Không có', pass = 'Không có', code = 'Không có'] = data.content.split('|');
         }
         if (!mail || !pass || mail === 'Không có' || pass === 'Không có') throw new Error('API trả về tài khoản không đúng định dạng.');
-        const fields = [{ name: '📧 Tài khoản', value: `\`${mail}\`` }, { name: '🔑 Mật khẩu', value: `\`${pass}\`` }];
+        const fields = [
+            { name: '📧 Tài khoản', value: `\`${mail}\`` },
+            { name: '🔑 Mật khẩu', value: `\`${pass}\`` },
+        ];
         if (code) fields.push({ name: '🎁 Mã mời', value: `\`${code}\`` });
         fields.push({ name: '💡 Mẹo', value: 'Bấm **📋 Sao chép**, nhấn giữ tin nhắn hiện ra rồi chọn **Sao chép văn bản**. Dán vào `/buycloud`, hoặc bấm **🛒 Mua ngay**.' });
         const embed = new EmbedBuilder().setColor(prov.color).setAuthor(providerAuthor(prov)).setTitle('Lấy tài khoản thành công')
@@ -521,7 +498,7 @@ async function handleRegProvider(interaction, providerKey) {
         charged = false; // tài khoản đã trả về thành công, giữ khoản trừ 10 xu
     } catch (error) {
         if (charged) await redis.incrby(`coins_${userId}`, 10).catch(e => console.error('[reg] Không hoàn được xu:', e.message));
-        await interaction.editReply({ content: `❌ ${error.message}`, embeds: regEmbeds(), components: [regMenu(interaction.client)] });
+        await interaction.editReply({ content: `❌ ${error.message}`, embeds: await regEmbeds(), components: [await regMenu(interaction.client)] });
     }
 }
 
@@ -834,35 +811,6 @@ async function handleInteraction(interaction) {
     if (interaction.commandName === 'buycloud') {
         return interaction.reply({ content: '**Chọn loại cloud bạn muốn mua:**', components: [buyMenu(interaction.client)], flags: MessageFlags.Ephemeral });
     }
-    if (interaction.commandName === 'ketnoi') {
-        const uid = interaction.user.id;
-        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-        const tries = await redis.incr(`ketnoi_try_${uid}`);
-        if (tries === 1) await redis.expire(`ketnoi_try_${uid}`, 600);
-        if (tries > 10) return interaction.editReply('⛔ Bạn thử quá nhiều lần. Đợi 10 phút rồi thử lại.');
-        const norm = String(interaction.options.getString('token') || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
-        if (!/^NGA[A-Z0-9]{12}$/.test(norm)) return interaction.editReply('❌ Token không đúng định dạng. Token có dạng `NGA-XXXX-XXXX-XXXX`, lấy ở Dashboard > Cài đặt.');
-        const webId = await redis.eval("local v=redis.call('GET',KEYS[1]); if v then redis.call('DEL',KEYS[1]) end return v", 1, `ketnoi_tok_${norm}`);
-        if (!webId || !/^[a-f0-9]{16}$/.test(webId)) return interaction.editReply('❌ Token sai, đã dùng hoặc đã hết hạn. Vào Dashboard > Cài đặt bấm **Tạo token mới**.');
-        await redis.del(`webtok_${webId}`);
-        await redis.set(`webacct_${webId}`, JSON.stringify({
-            discordId: uid,
-            name: interaction.user.globalName || interaction.user.username,
-            avatar: interaction.user.displayAvatarURL({ extension: 'png', size: 64 }),
-            at: Date.now()
-        }));
-        await redis.sadd(`discord_webs_${uid}`, webId);
-        await redis.del(`ketnoi_try_${uid}`);
-        return interaction.editReply('✅ **Liên kết thành công!** Quay lại Dashboard, trang sẽ tự mở Ví xu và Cloud Phone.\nNếu không phải bạn tạo token này, gõ `/ngatketnoi` để hủy.');
-    }
-    if (interaction.commandName === 'ngatketnoi') {
-        const uid = interaction.user.id;
-        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-        const ids = await redis.smembers(`discord_webs_${uid}`);
-        for (const w of ids) if (/^[a-f0-9]{16}$/.test(w)) await redis.del(`webacct_${w}`);
-        await redis.del(`discord_webs_${uid}`);
-        return interaction.editReply(ids.length ? `✅ Đã hủy ${ids.length} liên kết Dashboard. Muốn dùng lại thì lấy token mới và /ketnoi.` : 'ℹ️ Bạn chưa có liên kết Dashboard nào.');
-    }
     const adminIds = await getAdminIds();
     const userId = interaction.user.id;
 
@@ -881,7 +829,7 @@ async function handleInteraction(interaction) {
         if (!inRegChannel(interaction)) {
             return interaction.reply({ content: REG_DENY, flags: MessageFlags.Ephemeral });
         }
-        return interaction.reply({ embeds: regEmbeds(), components: [regMenu(interaction.client)], flags: MessageFlags.Ephemeral });
+        return interaction.reply({ embeds: await regEmbeds(), components: [await regMenu(interaction.client)], flags: MessageFlags.Ephemeral });
     }
 
     if (interaction.commandName === 'daily') {
@@ -984,7 +932,7 @@ async function handleInteraction(interaction) {
         await interaction.deferReply();
         const fee = Math.max(1, Math.floor(amount * 0.05));
         const net = amount - fee;
-        const result = await redis.eval(TRANSFER_COINS_LUA, 4, `coins_${userId}`, `coins_${target.id}`, 'leaderboard', weeklyLeaderboardKey(), amount, net, target.id);
+        const result = await redis.eval(TRANSFER_COINS_LUA, 3, `coins_${userId}`, `coins_${target.id}`, 'leaderboard', amount, net, target.id);
         if (Number(result[0]) !== 1) return interaction.editReply({ content: `❌ Không đủ xu (Hiện có ${result[1]} xu).` });
         await interaction.editReply({ content: `✅ Đã chuyển **${net} xu** cho <@${target.id}> (Phí: ${fee} xu).` });
     }
@@ -992,7 +940,7 @@ async function handleInteraction(interaction) {
     if (interaction.commandName === 'code') {
         const giftCode = interaction.options.getString('gift_code').trim();
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-        const codeData = await redis.eval(REDEEM_GIFT_LUA, 1, `gift_${giftCode}`, userId, weeklyLeaderboardKey());
+        const codeData = await redis.eval(REDEEM_GIFT_LUA, 1, `gift_${giftCode}`, userId);
         if (!codeData) return interaction.editReply({ content: `❌ Code sai hoặc đã dùng.` });
         await interaction.editReply({ content: `✅ Nhận **${codeData} xu**.` });
     }
@@ -1470,13 +1418,14 @@ app.post('/panel/api/update', panelAuth, deployAuth, async (req, res) => {
     try { new vm.Script(code, { filename: 'server_override.js' }); }
     catch (e) { return res.status(400).json({ error: 'Lỗi cú pháp trong file: ' + e.message }); }
     await redis.set('server_override', code);
+    try { await redis.set('server_override_base', crypto.createHash('sha1').update(require('fs').readFileSync(require('path').join(__dirname, 'server.js'))).digest('hex')); } catch {}
     await redis.set('override_boot', '0');
     console.log('[update] Đã lưu server.js mới, khởi động lại...');
     res.json({ ok: true });
     setTimeout(() => process.exit(0), 700);
 });
 app.delete('/panel/api/update', panelAuth, deployAuth, async (req, res) => {
-    await redis.del('server_override', 'override_boot');
+    await redis.del('server_override', 'server_override_base', 'override_boot');
     console.log('[update] Quay về server.js trên GitHub, khởi động lại...');
     res.json({ ok: true });
     setTimeout(() => process.exit(0), 700);
@@ -1485,9 +1434,7 @@ app.delete('/panel/api/update', panelAuth, deployAuth, async (req, res) => {
 setTimeout(() => redis.set('override_boot', '0').catch(() => {}), 60000);
 
 getPublicIp().then(ip => console.log('[IP] Địa chỉ IP máy chủ gọi ra ngoài:', ip || 'không lấy được'));
-
-require('./dashboard')(app, panelAuth, { redis, getBots, startBot, stopBot, saveBot, tokenOf, botView, running });
-
+require('./dashboard')(app, panelAuth, { redis, getBots, startBot, stopBot, saveBot, tokenOf, botView, running, weeklyLeaderboardKey, settlePreviousWeek });
 (async () => {
     try {
         for (const b of await getBots()) {
